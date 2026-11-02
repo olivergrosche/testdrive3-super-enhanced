@@ -95,7 +95,7 @@ bool enh_keys_suspended(void);        /* OG: ... and a message box waits for its
  * The game keeps running its cockpit view (physics, collisions and the clock read the ground under the cockpit
  * camera); only the enhanced view is drawn from behind the car, over the whole screen, with the cockpit's
  * gauges, gear box and top panels laid over it. Not in the original's external views (F5, replays, crashes). */
-#define ENH_CHASE_DEFAULT true
+#define ENH_CHASE_DEFAULT false        /* the user: always start in the cockpit (first person) */
 void enh_chase_set(bool on);
 bool enh_chase_pref(void);
 void enh_chase_toggle(void);

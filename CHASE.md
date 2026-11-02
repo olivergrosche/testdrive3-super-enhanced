@@ -26,8 +26,8 @@ reason. Only the enhanced view (`enhanced.c`, `enh_scene.c`) is drawn from behin
   their corners' lines of sight with the ground under the car. The near edge, which the dashboard hides, is
   moved to the car's front. The patch is drawn as a light before the car.
 * **When.** A race in the cockpit view (`enh_keys_racing`, not `ext_view`, not the menu preview). F5, replays
-  and the crash sequence are the original's. F8 or the pad's Y switch between chase and cockpit. The default is
-  chase (`ENH_CHASE_DEFAULT`); `TD3_VIEW=cockpit` starts in the cockpit.
+  and the crash sequence are the original's. F8 or the pad's Y switch between chase and cockpit. The game
+  always starts in the cockpit (`ENH_CHASE_DEFAULT`, the user's wish); `TD3_VIEW=chase` starts in the chase view.
 
 Cost at 1280 × 800, 2 × 2 AA: about 8 ms a frame (the cockpit window alone: about 4 ms).
 
@@ -51,7 +51,9 @@ A steering key takes over from the stick until the stick is moved again.
 * `TD3_PAD="<s>:<ctl>=<v>[+...],..."`: a virtual gamepad (`lx ly rx ry` -1..1, `lt rt` -1 (up)..1, buttons
   `a b x y lb rb start back up down left right ls rs` 0/1).
 * `TD3_NO_PADS=1`: real pads are ignored (the virtual one is still used).
-* `TD3_VIEW=cockpit`, `TD3_CHASE=dist,height,row`.
+* `TD3_VIEW=chase|cockpit`, `TD3_CHASE=dist,height,row`.
+* `testdrive3-enhanced.args` next to the exe: options read before the command line's own (GameHub, Steam
+  shortcuts). If there is no `Game` folder in the working directory, the one next to the exe is used.
 
 Headless test: `SDL_VIDEO_DRIVER=dummy SDL_AUDIO_DRIVER=dummy TD3_NO_PADS=1 TD3_SNAPSHOT_DIR=snaps
 TD3_KEYS="4:1c,7:1c,10:e048p" testdrive3-enhanced --game-dir Game`. This goes through the menu (two Enters)

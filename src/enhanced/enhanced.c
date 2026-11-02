@@ -77,8 +77,9 @@ static void chase_params(void)
     static bool done;
     if (done) return;
     done = true;
-    const char *vw = SDL_getenv("TD3_VIEW");             /* developer aid: TD3_VIEW=cockpit starts in the cockpit */
+    const char *vw = SDL_getenv("TD3_VIEW");             /* developer aid: TD3_VIEW=chase / cockpit to start in it */
     if (vw && !strcmp(vw, "cockpit")) chase_pref = false;
+    if (vw && !strcmp(vw, "chase")) chase_pref = true;
     const char *e = SDL_getenv("TD3_CHASE");
     double a, b, c;
     if (e && sscanf(e, "%lf,%lf,%lf", &a, &b, &c) == 3) { chase_dist = a; chase_height = b; chase_row = c; }

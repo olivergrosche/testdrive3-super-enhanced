@@ -56,9 +56,55 @@ static int usage(const char *prog)
     return 2;
 }
 
+/* OG: options from testdrive3-enhanced.args next to the exe (one line, as on the command line), put before the
+ * command line's own: for launchers that can't pass arguments (GameHub on Android, a Steam shortcut). */
+static char **args_with_file(int *argc, char **argv)
+{
+    const char *base = SDL_GetBasePath();
+    if (!base) return argv;
+    char path[1024];
+    snprintf(path, sizeof path, "%stestdrive3-enhanced.args", base);
+    FILE *f = fopen(path, "rb");
+    if (!f) return argv;
+    static char line[1024];
+    size_t n = fread(line, 1, sizeof line - 1, f);
+    fclose(f);
+    line[n] = 0;
+    static char *out[64];
+    int k = 0;
+    out[k++] = argv[0];
+    for (char *p = line; *p && k < 48; ) {
+        while (*p == ' ' || *p == '\t' || *p == '\r' || *p == '\n') p++;
+        if (!*p) break;
+        char *s = p;
+        if (*p == '"') { s = ++p; while (*p && *p != '"') p++; }
+        else while (*p && *p != ' ' && *p != '\t' && *p != '\r' && *p != '\n') p++;
+        if (*p) *p++ = 0;
+        out[k++] = s;
+    }
+    for (int i = 1; i < *argc && k < 63; i++) out[k++] = argv[i];
+    out[k] = NULL;
+    *argc = k;
+    return out;
+}
+
+/* OG: "Game" relative to the working directory, else "Game" next to the exe */
+static const char *default_game_dir(void)
+{
+    FILE *probe = fopen("Game/" TD_EXE_NAME, "rb");
+    if (!probe) probe = fopen("Game/" TD_EXE_ALT_NAME, "rb");
+    if (probe) { fclose(probe); return "Game"; }
+    const char *base = SDL_GetBasePath();
+    if (!base) return "Game";
+    static char dir[1024];
+    snprintf(dir, sizeof dir, "%sGame", base);
+    return dir;
+}
+
 int main(int argc, char **argv)
 {
-    const char *dir = "Game";
+    argv = args_with_file(&argc, argv);
+    const char *dir = default_game_dir();
     int scale = 3;
     bool check = false, fullscreen = false, classic = false;
     int res_scale = -1, aa = ENH_DEFAULT_AA, motion_delay = ENH_DEFAULT_MOTION_DELAY;
