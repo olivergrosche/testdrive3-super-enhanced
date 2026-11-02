@@ -31,6 +31,26 @@ reason. Only the enhanced view (`enhanced.c`, `enh_scene.c`) is drawn from behin
 
 Cost at 1280 × 800, 2 × 2 AA: about 8 ms a frame (the cockpit window alone: about 4 ms).
 
+## Widescreen
+
+`--aspect auto|4:3|16:9|16:10|W:H` (default auto = the desktop's shape, 4:3 .. 21:9; `--classic` is always
+4:3). The 320 × 200 picture keeps its place in the middle of a frame `EM` = `host_wide_margin()` columns wider
+on each side (16:9: 53, 16:10: 32). The window, the logical presentation (frame rows × 6/5) and the mouse
+follow the frame.
+
+* Menus and other screens: black margins (pillarbox).
+* A full-width game window (cockpit, F5, replays) and the chase view: the front target is `enh_wide_cols`
+  columns wider on each side. Bearings stay the original's; the target's x is `sx + SHIFT`, and the
+  visibility tests use the target's width. Cockpit overlays are shifted; the dashboard edge's polygons
+  touching the window's sides are pulled out to the target's sides (`ov_wide_x`).
+* The rows the 3D does not cover (the roof, the dashboard, F5's panel) continue each row's outermost colour
+  outwards, darkening to 45 % at the frame's edge (`fill_margins`). A mirrored tiling of the edge columns made
+  zigzags.
+* Chase view: the panels, dials and gear window sit in the frame's corners.
+
+Cost grows with the width (16:9: × 1.33). Under GameHub, the desktop is GameHub's resolution setting, so set it
+to the tablet's shape (for example 1280 × 800 for 16:10).
+
 ## Gamepad
 
 `host.c` `pad_update` feeds the game the keys it knows. They are fed past the key bindings, as the actions'

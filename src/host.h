@@ -8,6 +8,12 @@
 #define PIT_DIV_GAME  0x2000u        /* 8192 -> 145.652 Hz, timer_install 0c1c:109f (platform.md 4.4.2) */
 
 bool host_init(const char *game_dir, int window_scale, bool fullscreen);
+
+/* OG: widescreen. host_set_aspect before host_init: the picture's width / height (0 = the desktop's, 4/3 = the
+ * original). The 320 x 200 picture keeps its place in the middle; host_wide_margin is how many 320-wide pixel
+ * columns are added on each side (0 at 4:3). The frame source's width includes them. */
+void host_set_aspect(double aspect);
+int  host_wide_margin(void);
 void host_shutdown(void);
 
 /* Called once per 145.652 Hz tick from host_pump() (the port's replacement for INT 8). The platform

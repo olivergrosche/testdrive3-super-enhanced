@@ -255,6 +255,8 @@ void enh_target_raster(EnhTarget *t, const EnhSnap *snap);
 /* ---- the scene (enh_scene.c) ---- */
 extern EnhTarget enh_front, enh_mirror;
 void enh_scene_build(const EnhSnap *s, const EnhView *v);
+/* OG widescreen: columns the front target adds on each side of the game's window (set before enh_scene_build) */
+extern int enh_wide_cols;
 /* the colour the haze tends to: the sky at the horizon, as a sample value (resolved through the current DAC) */
 u32 enh_haze_colour(const EnhSnap *s);
 /* the game's ground under (x4, z4): the highest ground-like face there not more than `above` over y (-1e9: none) */

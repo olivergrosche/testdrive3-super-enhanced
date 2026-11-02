@@ -80,6 +80,7 @@ cmake --build build
 | `--car CODE`, `--course CODE` | Start car / course, e.g. `CCNSX`, `SCENE02` |
 | `--skill N` | Skill level 1–9 (1–3 automatic) |
 | `--check` | Check that `TDIII.EXE` loads, then exit |
+| `--aspect auto\|4:3\|16:9\|16:10\|W:H` | Picture shape (default auto = the screen's; fork og1, `CHASE.md`) |
 
 ## Controls
 

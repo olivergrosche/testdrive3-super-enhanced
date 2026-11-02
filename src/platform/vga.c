@@ -16,6 +16,7 @@ static u8 last_dac[256][3];
 static u16 last_start = 0xFFFF;
 
 static int scale = 1;                  /* ENH: output = 320x200 times this */
+static int margin;                     /* OG: widescreen columns each side (host_wide_margin) */
 
 static bool compose(u32 *xrgb)
 {
@@ -37,16 +38,17 @@ static bool compose(u32 *xrgb)
         u32 b = (u32)(dac[i][2] << 2 | dac[i][2] >> 4);
         pal[i] = r << 16 | g << 8 | b;
     }
-    if (scale == 1) {
+    if (scale == 1 && margin == 0) {
         for (int i = 0; i < 320 * 200; i++)
             xrgb[i] = pal[vram[(u16)(start + i)]];
     } else {                           /* ENH: the VGA picture scaled up, then the enhanced view over it */
-        int w = 320 * scale;
+        int w = (320 + 2 * margin) * scale, m = margin * scale;   /* OG: black margins either side */
         for (int y = 0; y < 200; y++) {
             u32 *row = xrgb + (size_t)y * scale * w;
+            for (int i = 0; i < m; i++) { row[i] = 0; row[w - 1 - i] = 0; }
             for (int x = 0; x < 320; x++) {
                 u32 c = pal[vram[(u16)(start + y * 320 + x)]];
-                for (int i = 0; i < scale; i++) row[x * scale + i] = c;
+                for (int i = 0; i < scale; i++) row[m + x * scale + i] = c;
             }
             for (int j = 1; j < scale; j++) memcpy(row + (size_t)j * w, row, sizeof(u32) * (size_t)w);
         }
@@ -61,7 +63,8 @@ void vga_init(void)
     start = 0;
     dirty = true;
     scale = enh_res_scale();
-    host_set_frame_source(compose, 320 * scale, 200 * scale);
+    margin = host_wide_margin();
+    host_set_frame_source(compose, (320 + 2 * margin) * scale, 200 * scale);
 }
 
 void vga_dac_write(u8 index, u8 r, u8 g, u8 b)

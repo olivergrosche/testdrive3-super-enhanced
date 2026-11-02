@@ -26,8 +26,15 @@ static void (*focus_lost_handler)(void);
 static bool (*frame_source)(u32 *);
 static u32 *frame;                      /* frame_w x frame_h */
 static int frame_w = 320, frame_h = 200;
-#define VIEW_W(w) (w)                   /* logical presentation: frame width x 3/4 of it (4:3) */
-#define VIEW_H(w) ((w) * 3 / 4)
+/* logical presentation: the frame's width x its rows times 6/5 (the 200-line picture fills 240: tall pixels).
+ * OG: was width x 3/4 (4:3 only); with the widescreen margins the width grows. */
+#define VIEW_W(w) (w)
+#define VIEW_H(w) (frame_h * 6 / 5)
+static double aspect_pref;              /* OG: 0 = the desktop's */
+static int wide_margin;                 /* OG: columns added each side, in 320-wide pixels */
+
+void host_set_aspect(double aspect) { aspect_pref = aspect; }
+int  host_wide_margin(void) { return wide_margin; }
 
 /* Tick clock: tick n is due at start + n * 8192 / 1193182 s (exact rational arithmetic). */
 static Uint64 clock_start_ns;
@@ -57,7 +64,17 @@ bool host_init(const char *dir, int window_scale, bool fullscreen)
     }
     game_dir = SDL_strdup(dir);
     if (window_scale < 1) window_scale = 3;
-    if (!SDL_CreateWindowAndRenderer("Test Drive III Enhanced", 320 * window_scale, 240 * window_scale,
+    /* OG: widescreen: the picture as wide as the desktop (or --aspect), 4:3 .. 21:9 */
+    double a = aspect_pref;
+    if (a <= 0) {
+        const SDL_DisplayMode *m = SDL_GetDesktopDisplayMode(SDL_GetPrimaryDisplay());
+        a = m && m->h > 0 ? (double)m->w / m->h : 4.0 / 3.0;
+    }
+    if (a < 4.0 / 3.0) a = 4.0 / 3.0;
+    if (a > 21.0 / 9.0) a = 21.0 / 9.0;
+    wide_margin = (int)SDL_lround(120.0 * a) - 160;
+    if (wide_margin < 0) wide_margin = 0;
+    if (!SDL_CreateWindowAndRenderer("Test Drive III Enhanced", (320 + 2 * wide_margin) * window_scale, 240 * window_scale,
                                      SDL_WINDOW_RESIZABLE, &window, &renderer)) {
         fprintf(stderr, "window/renderer failed: %s\n", SDL_GetError());
         return false;
@@ -113,7 +130,7 @@ void host_set_frame_source(bool (*compose)(u32 *), int w, int h)
     if (texture) SDL_DestroyTexture(texture);
     texture = SDL_CreateTexture(renderer, SDL_PIXELFORMAT_XRGB8888, SDL_TEXTUREACCESS_STREAMING, frame_w, frame_h);
     /* ENH: a high-resolution frame is filtered when the window is not an exact multiple of it */
-    SDL_SetTextureScaleMode(texture, frame_w > 320 ? SDL_SCALEMODE_LINEAR : SDL_SCALEMODE_NEAREST);
+    SDL_SetTextureScaleMode(texture, frame_h > 200 ? SDL_SCALEMODE_LINEAR : SDL_SCALEMODE_NEAREST);
 }
 
 static Uint64 tick_due_ns(Uint64 n)
@@ -594,7 +611,7 @@ void host_mouse_read(s16 *x, s16 *y, u8 *buttons)
     /* Logical presentation is 320 x 240 (4:3); the game's screen is 320 x 200. */
     float px = SDL_clamp(mouse_x, 0.0f, (float)VIEW_W(frame_w) - 1);
     float py = SDL_clamp(mouse_y, 0.0f, (float)VIEW_H(frame_w) - 1);
-    if (x) *x = (s16)(px * 320 / VIEW_W(frame_w));
+    if (x) *x = (s16)(px * (320 + 2 * wide_margin) / VIEW_W(frame_w) - wide_margin);   /* OG: margins */
     if (y) *y = (s16)(py * 200 / VIEW_H(frame_w));
     SDL_MouseButtonFlags b = SDL_GetMouseState(NULL, NULL);
     if (buttons) *buttons = (u8)(((b & SDL_BUTTON_LMASK) ? 1 : 0) | ((b & SDL_BUTTON_RMASK) ? 2 : 0));

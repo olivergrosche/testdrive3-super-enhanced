@@ -819,10 +819,14 @@ static inline u32 sample_rgb(u32 s, u16 l)
     return h ? mix_rgb(c, haze_rgb, h) : c;
 }
 
+/* OG widescreen: columns added each side of the 320-wide picture (host_wide_margin); the frame is
+ * (320 + 2 EM) x 200 times the scale, the VGA picture at column EM */
+static int EM;
+
 /* Output pixel block of the view pixel (c, r) of a target: S x S pixels, each the average of A x A samples. */
 static void paste_block(u32 *out, int ox, int oy, const EnhTarget *t, int c, int r)
 {
-    int S = enh_scale, A = enh_aa, W = 320 * S;
+    int S = enh_scale, A = enh_aa, W = (320 + 2 * EM) * S;
     for (int j = 0; j < S; j++) {
         u32 *o = out + (size_t)(oy + j) * W + ox;
         for (int i = 0; i < S; i++) {
@@ -851,13 +855,51 @@ static void paste_front_row(int r, void *vctx)
     if (r < e->msg_rows) return;
     int sy = e->y0 + r;
     if (sy < 0 || sy >= 200) return;
-    for (int c = 0; c < e->w; c++) {
-        int sx = e->x0 + c;
-        if (sx < 0 || sx >= 320 || (compare == 1 && sx >= 160) || (compare == 2 && sx < 160)) continue;
-        if (e->hole && r < 14 && sx >= 168 && sx < 256) continue;
-        int vi = r * 320 + c;
-        if (pc->vram[sy * 320 + sx] != e->vbuf[vi] || e->vbuf[vi] != e->fbuf[vi]) continue;
-        paste_block(pc->out, sx * enh_scale, sy * enh_scale, &enh_front, c, r);
+    int cols = enh_wide_cols;                              /* OG: the target's extra columns each side */
+    for (int ct = 0; ct < e->w + 2 * cols; ct++) {
+        int c = ct - cols, sx = e->x0 + c;
+        if ((compare == 1 && sx >= 160) || (compare == 2 && sx < 160)) continue;
+        if (c >= 0 && c < e->w) {                           /* the game's window: as the original screen allows */
+            if (sx < 0 || sx >= 320) continue;
+            if (e->hole && r < 14 && sx >= 168 && sx < 256) continue;
+            int vi = r * 320 + c;
+            if (pc->vram[sy * 320 + sx] != e->vbuf[vi] || e->vbuf[vi] != e->fbuf[vi]) continue;
+        } else if (sx < -EM || sx >= 320 + EM) continue;    /* OG: the margins */
+        paste_block(pc->out, (sx + EM) * enh_scale, sy * enh_scale, &enh_front, ct, r);
+    }
+}
+
+/* OG widescreen: the margins of the rows the 3D view does not reach (the roof, the dashboard, panels) continue
+ * the picture's outermost columns: each row's edge colour (3 columns x 3 rows averaged) drawn outwards, darkening
+ * towards the frame's edge, as the dashboard and the roof going into the doors' shadow */
+static void fill_margins(u32 *xrgb, int skip0, int skip1)
+{
+    int S = enh_scale, W = (320 + 2 * EM) * S, M = EM * S;
+    if (EM <= 0) return;
+    for (int y = 0; y < 200; y++) {
+        if (y >= skip0 && y < skip1) continue;
+        u32 rl = 0, gl = 0, bl = 0, rr = 0, gr = 0, br = 0, n = 0;
+        for (int yy = y - 1; yy <= y + 1; yy++) {
+            if (yy < 0 || yy >= 200 || (yy >= skip0 && yy < skip1)) continue;
+            const u32 *row = xrgb + (size_t)(yy * S + S / 2) * W;
+            for (int c = 0; c < 3; c++) {
+                u32 l = row[(EM + c) * S + S / 2], r = row[(EM + 319 - c) * S + S / 2];
+                rl += l >> 16 & 0xFF; gl += l >> 8 & 0xFF; bl += l & 0xFF;
+                rr += r >> 16 & 0xFF; gr += r >> 8 & 0xFF; br += r & 0xFF;
+                n++;
+            }
+        }
+        if (!n) continue;
+        for (int i = 0; i < M; i++) {
+            double f = 1.0 - 0.55 * ((i + 0.5) / M);      /* i output columns out from the picture */
+            u32 L = (u32)(rl / n * f) << 16 | (u32)(gl / n * f) << 8 | (u32)(bl / n * f);
+            u32 R = (u32)(rr / n * f) << 16 | (u32)(gr / n * f) << 8 | (u32)(br / n * f);
+            for (int jj = 0; jj < S; jj++) {
+                u32 *row = xrgb + (size_t)(y * S + jj) * W;
+                row[M - 1 - i] = L;
+                row[W - M + i] = R;
+            }
+        }
     }
 }
 
@@ -867,14 +909,16 @@ static void paste_front_row(int r, void *vctx)
 typedef struct { double cx, cy, rx, ry; } HudOval;
 static const HudOval hud_ovals[] = { { 92.5, 154.0, 22.5, 19.0 }, { 138.5, 154.0, 22.5, 19.0 } };
 typedef struct { int x0, y0, x1, y1; } HudRect;                     /* [x0, x1) x [y0, y1) */
-/* in place: the top panels (compass and clock, radar detector) */
-static const HudRect hud_rects[] = { { 6, 5, 65, 16 }, { 263, 4, 317, 16 } };
-/* moved out of the car's way: the dials (cut out as the two ovals) to the bottom left, the gear lever's window
- * to the bottom right. Source rectangle, then where its top left corner goes. */
-typedef struct { HudRect src; int dx0, dy0; bool ovals; } HudMove;
+/* OG: everything is moved to the screen's corners (with widescreen margins: the frame's corners): the top panels
+ * (compass and clock, radar detector), the dials (cut out as the two ovals) bottom left, the gear lever's window
+ * bottom right (only while the game shows it). Source rectangle in the 320 x 200 picture, then where its top
+ * left corner goes: x from the frame's left (right = true: x is the gap to the frame's right edge). */
+typedef struct { HudRect src; int dx0, dy0; bool right, ovals, lever; } HudMove;
 static const HudMove hud_moves[] = {
-    { { 68, 133, 164, 177 }, 3, 154, true },
-    { { 248, 124, 304, 172 }, 263, 151, false },
+    { { 6, 5, 65, 16 }, 6, 5, false, false, false },
+    { { 263, 4, 317, 16 }, 3, 4, true, false, false },
+    { { 68, 133, 164, 177 }, 3, 154, false, true, false },
+    { { 248, 124, 304, 172 }, 1, 151, true, false, true },
 };
 #define HUD_NMOVES ((int)(sizeof hud_moves / sizeof hud_moves[0]))
 
@@ -891,15 +935,10 @@ static double hud_oval_cover(double x, double y, double aa)
     return best;
 }
 
-/* the view pixel (c, r) stays the VGA picture (a top panel, a message box) */
+/* the pixel (c, r) of the 320 x 200 picture stays the VGA picture (a message box) */
 static bool hud_keep(int c, int r)
 {
-    if (msgbox.on && c >= msgbox.x0 && c <= msgbox.x1 && r >= msgbox.y0 && r <= msgbox.y1) return true;
-    for (size_t i = 0; i < sizeof hud_rects / sizeof hud_rects[0]; i++) {
-        const HudRect *h = &hud_rects[i];
-        if (c >= h->x0 && c < h->x1 && r >= h->y0 && r < h->y1) return true;
-    }
-    return false;
+    return msgbox.on && c >= msgbox.x0 && c <= msgbox.x1 && r >= msgbox.y0 && r <= msgbox.y1;
 }
 
 /* the moved instruments: taken from the scaled VGA picture before the view covers it, laid over it after */
@@ -908,7 +947,7 @@ static int hud_buf_scale;
 
 static void hud_take(const u32 *xrgb)
 {
-    int S = enh_scale, W = 320 * S;
+    int S = enh_scale, W = (320 + 2 * EM) * S;
     if (hud_buf_scale != S) {
         for (int m = 0; m < HUD_NMOVES; m++) {
             const HudRect *r = &hud_moves[m].src;
@@ -922,24 +961,26 @@ static void hud_take(const u32 *xrgb)
         int w = (r->x1 - r->x0) * S, h = (r->y1 - r->y0) * S;
         if (!hud_buf[m]) continue;
         for (int j = 0; j < h; j++)
-            memcpy(hud_buf[m] + (size_t)j * w, xrgb + (size_t)(r->y0 * S + j) * W + (size_t)r->x0 * S, sizeof(u32) * (size_t)w);
+            memcpy(hud_buf[m] + (size_t)j * w, xrgb + (size_t)(r->y0 * S + j) * W + (size_t)(r->x0 + EM) * S,
+                   sizeof(u32) * (size_t)w);
     }
 }
 
 static void hud_put(u32 *xrgb)
 {
-    int S = enh_scale, W = 320 * S;
+    int S = enh_scale, W = (320 + 2 * EM) * S;
     for (int m = 0; m < HUD_NMOVES; m++) {
         const HudMove *mv = &hud_moves[m];
         const HudRect *r = &mv->src;
         int w = (r->x1 - r->x0) * S, h = (r->y1 - r->y0) * S;
         if (!hud_buf[m]) continue;
-        if (!mv->ovals && DSB(DS_look_rect_dirty) == 0) continue;   /* the lever's window: only while it is up */
+        if (mv->lever && DSB(DS_look_rect_dirty) == 0) continue;    /* the lever's window: only while it is up */
+        int dx = mv->right ? 320 + 2 * EM - mv->dx0 - (r->x1 - r->x0) : mv->dx0;
         for (int j = 0; j < h; j++) {
             int oy = mv->dy0 * S + j;
             if (oy < 0 || oy >= 200 * S) continue;
             for (int i = 0; i < w; i++) {
-                int ox = mv->dx0 * S + i;
+                int ox = dx * S + i;
                 if (ox < 0 || ox >= W) continue;
                 double k = mv->ovals ? hud_oval_cover(r->x0 + (i + 0.5) / S, r->y0 + (j + 0.5) / S, 1.0 / S) : 1.0;
                 if (k <= 0.0) continue;
@@ -953,11 +994,10 @@ static void hud_put(u32 *xrgb)
 static void paste_chase_row(int r, void *vctx)
 {
     const PasteCtx *pc = vctx;
-    int S = enh_scale, A = enh_aa, W = 320 * S;
+    int S = enh_scale;
     const EnhTarget *t = &enh_front;
-    (void)A; (void)W;
-    for (int c = 0; c < ENH_CHASE_W; c++)
-        if (!hud_keep(c, r)) paste_block(pc->out, c * S, r * S, t, c, r);
+    for (int c = 0; c < ENH_CHASE_W + 2 * enh_wide_cols; c++)   /* OG: frame column c, the picture's c - EM */
+        if (!hud_keep(c - EM, r)) paste_block(pc->out, c * S, r * S, t, c, r);
 }
 
 /* the part of M that mirror_present copies (rounded top), without the frame mirror_frame_draw paints */
@@ -981,7 +1021,7 @@ static void paste_mirror_row(int r, void *vctx)
         int sx = 168 + c;
         if ((compare == 1 && sx >= 160) || (compare == 2 && sx < 160)) continue;
         if (pc->vram[sy * 320 + sx] != e->mbuf[r * 88 + c]) continue;
-        paste_block(pc->out, sx * enh_scale, sy * enh_scale, &enh_mirror, c, r);
+        paste_block(pc->out, (sx + EM) * enh_scale, sy * enh_scale, &enh_mirror, c, r);
     }
 }
 
@@ -990,6 +1030,10 @@ bool enh_compose(u32 *xrgb, const u32 pal[256])
     if (!enabled || !enh_present.active || !enh_cur->valid) return false;
     const EnhSnap *s = enh_cur;
     u64 t0 = host_time_ns();
+    EM = host_wide_margin();
+    /* OG widescreen: the chase view and a full-width game window (cockpit, F5, replays) reach into the margins */
+    bool full = s->chase || (!s->menu_preview && (int)s->w32m + 0x20 == 320 * 32);
+    enh_wide_cols = full && !compare_on() ? EM : 0;
     view_compute();
     enh_scene_build(s, &view);
     enh_target_raster(&enh_front, s);
@@ -1006,6 +1050,11 @@ bool enh_compose(u32 *xrgb, const u32 pal[256])
         int rows = enh_present.rows < s->rows ? enh_present.rows : s->rows;
         host_parallel_for(rows, paste_front_row, &pc);
         if (enh_present.mirror && s->mirror_on && enh_present.hole) host_parallel_for(19, paste_mirror_row, &pc);
+        if (!s->menu_preview) {                           /* OG: the margins of the rows the 3D does not cover */
+            int y0 = enh_present.y0 + enh_present.msg_rows, y1 = enh_present.y0 + rows;
+            if (enh_wide_cols == 0) y0 = y1 = 0;
+            fill_margins(xrgb, y0, y1);
+        }
     }
 
     /* Developer aid: TD3_ENH_LOG=file appends one line per displayed frame (time, phase, camera, cost). */

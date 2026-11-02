@@ -8,6 +8,9 @@
   cockpit; F8 or the pad's Y switches views (`CHASE.md`).
 - Gamepad: triggers for gas and brake, analog steering on the left stick, buttons for shifting, handbrake, lights,
   pause and the camera, the right stick to look around. The pad also works in the menus and message boxes.
+- Widescreen (`--aspect`, default the screen's shape). The 3D view gets wider, nothing is stretched. The
+  dashboard and roof continue outwards into shadow, and in the chase view the instruments sit in the corners.
+  Menus keep 4:3 with black bars.
 - Builds with a static SDL3 (no SDL3.dll to copy).
 - `testdrive3-enhanced.args` next to the exe holds start options (for GameHub and Steam shortcuts), and the
   `Game` folder next to the exe is found from any working directory.

@@ -22,6 +22,10 @@ static double W32;                               /* view width * 32 (DS:BA95 + 2
 static double CX32;                              /* view centre, 1/32 px (DS:BA97) */
 static double VROWS;                             /* view rows */
 static double CXA;                               /* OG: the view centre in bearing units (BA99 << 8; the chase view's 1400h) */
+/* OG widescreen: the front target is wider than the game's window by enh_wide_cols columns each side. Bearings
+ * (sx[]) stay the original's; the front target's x = sx + SHIFT (1/32 px), W32 = the whole target. */
+static double SHIFT;
+int enh_wide_cols;
 
 static int NV;                                   /* vertices: the game's, then the far ring's */
 static double sx[ENH_MAX_ALL_VERTS];             /* bearing on screen, [0, 65536) (sx[] of 394c) */
@@ -240,13 +244,14 @@ static void unwrap(int n, double *x, double centre)
 
 static bool front_visible(int n, const int *v)
 {
+    /* the original's 3a9e test for a 320 (2800h) wide window; OG: for the target's width and offset */
     bool all = true;
-    for (int k = 0; k < n; k++) if (!NEG(sx[v[k]])) all = false;
+    for (int k = 0; k < n; k++) if (!NEG(sx[v[k]] + SHIFT)) all = false;
     if (all) return false;
     bool any = false;
-    for (int k = 0; k < n; k++) if (NEG(sx[v[k]] - 0x2800)) any = true;
+    for (int k = 0; k < n; k++) if (NEG(sx[v[k]] + SHIFT - W32)) any = true;
     if (!any) return false;
-    for (int k = 0; k < n; k++) if (NEG(sx[v[k]] - 0x5400)) return true;
+    for (int k = 0; k < n; k++) if (NEG(sx[v[k]] + SHIFT - W32 - 0x2C00)) return true;
     return false;
 }
 
@@ -285,7 +290,7 @@ static u8 face_type;                             /* w3 >> 11 */
 static void front_poly(int n, const int *v)
 {
     double x[4], y[4];
-    for (int k = 0; k < n; k++) { x[k] = sx[v[k]]; y[k] = fy[v[k]]; }
+    for (int k = 0; k < n; k++) { x[k] = sx[v[k]] + SHIFT; y[k] = fy[v[k]]; }
     unwrap(n, x, W32 / 2);
     poly(n, x, y, face_value, face_or);
 }
@@ -323,7 +328,7 @@ static void around_camera(const int *v)
     double big = VROWS + 4;
     for (int e = 0; e < 3; e++) {
         int a = o[e], b = o[(e + 1) % 3];
-        double x0 = sx[a], x1 = sx[b] + (e == 2 ? TURN : 0.0);
+        double x0 = sx[a] + SHIFT, x1 = sx[b] + SHIFT + (e == 2 ? TURN : 0.0);
         for (int s = 0; s < 2; s++) {
             double sh = s ? -TURN : 0.0, xa = x0 + sh, xb = x1 + sh;
             if (xb < 0 || xa > W32) continue;
@@ -383,7 +388,7 @@ static void draw_line(int v0, int v1, u16 w0)
     double x[2], y[2];
     if (front) {
         T = &enh_front;
-        x[0] = sx[v0]; x[1] = sx[v1];
+        x[0] = sx[v0] + SHIFT; x[1] = sx[v1] + SHIFT;
         unwrap(2, x, W32 / 2);
         y[0] = fy[v0]; y[1] = fy[v1];
     } else {
@@ -400,7 +405,8 @@ static void draw_line(int v0, int v1, u16 w0)
 static void draw_point(int v0, u16 w0)
 {
     double x = sx[v0];
-    bool front = !NEG(x) && !NEG(x + 0x5800) && !NEG(x + 0x2C00);
+    double xf = wrapu(x + SHIFT);                            /* OG: the target's x: [0, W32) is the view */
+    bool front = xf < W32;
     if (!front) {
         if (!S->mirror_on) return;
         double m = x - S->mirror_base;
@@ -429,7 +435,7 @@ static void draw_point(int v0, u16 w0)
     double cx, cy;
     if (front) {
         T = &enh_front;
-        double xs[1] = { x };
+        double xs[1] = { x + SHIFT };
         unwrap(1, xs, W32 / 2);
         cx = xs[0] / 32.0;
         cy = fy[v0];
@@ -582,10 +588,13 @@ static void draw_sprite(const SprItem *it)
     double ang = it->angle;
     u8 v = (u8)((u8)(wrapu(ang) / 256.0) + 8);
     bool mirror = false;
-    if (v >= 0x40) {
+    double af = wraps(ang + SHIFT);                          /* OG: the front window [-800h, W32 + 1000h) */
+    bool front_spr = af >= -0x800 && af < W32 + 0x1000;
+    if (!front_spr) {
         if ((u8)(v + 0x74) >= 0x20 || !S->mirror_on) return;
         mirror = true;
     }
+    (void)v;
     if (key <= 0x10) return;
     /* ENH: with the far ring the sprites reach as far as it does, not the detail level's B6E2 */
     if (cl > 5) { if (key >= (S->nff > 0 ? enh_draw_dist * 0x1000 : S->spr_far_limit)) return; }
@@ -605,7 +614,7 @@ static void draw_sprite(const SprItem *it)
     double sa = wraps(ang);
     EnhPrim *p;
     if (!mirror) {
-        double x = sa / 32.0;
+        double x = (sa + SHIFT) / 32.0;
         double top = row + 1 + V->roll_slope * wraps(ang - CX32) - h + V->cam_row;
         p = enh_prim_add(&enh_front, P_SPRITE);
         if (!p) return;
@@ -658,7 +667,7 @@ static void draw_sprite(const SprItem *it)
 static void sky_ground(void)
 {
     double wpx = W32 / 32.0;
-    double yl = V->cam_row + V->roll_slope * (0 - CX32), yr = V->cam_row + V->roll_slope * (W32 - CX32);
+    double yl = V->cam_row + V->roll_slope * (-SHIFT - CX32), yr = V->cam_row + V->roll_slope * (W32 - SHIFT - CX32);
     EnhPrim *p = enh_prim_add(&enh_front, P_SKY);
     if (p) {
         p->value = ENH_PAIR(S->sky_pair);
@@ -693,7 +702,7 @@ static void chase_beam(void)
     for (int k = 0; k < 6; k++) {
         double dx = wraps(V->beam_vx[k] - V->cam_x4), dz = wraps(V->beam_vz[k] - V->cam_z4);
         double d = sqrt(dx * dx + dz * dz);
-        px[k] = wrapu(atan2(dx, dz) * RAD2A + CXA - V->heading);
+        px[k] = wrapu(atan2(dx, dz) * RAD2A + CXA - V->heading) + SHIFT;
         py[k] = V->cam_row - elev(V->beam_vy[k] - V->cam_y, d);
     }
     unwrap(6, px, W32 / 2);
@@ -711,6 +720,18 @@ static void chase_beam(void)
     z_mode = zm;
 }
 
+/* OG: an overlay x (V pixels) in the target, 1/32 px: shifted; one at the window's side (the dashboard edge)
+ * reaches out to the target's side */
+static double ov_wide_x(double x)
+{
+    if (enh_wide_cols > 0) {
+        double wpx = (W32 - 2 * SHIFT) / 32.0;
+        if (x <= 0.5) x = -enh_wide_cols;
+        else if (x >= wpx - 1.5) x = wpx + enh_wide_cols;
+    }
+    return x * 32.0 + SHIFT;
+}
+
 static void overlays(void)
 {
     T = &enh_front;
@@ -721,12 +742,13 @@ static void overlays(void)
             if (!p) return;
             p->first = c->first;
             p->count = c->count;
+            p->n = enh_wide_cols;                            /* OG: the blocks' column shift */
         } else if (c->kind == OV_QUAD) {
             double x[4], y[4];
-            for (int k = 0; k < 4; k++) { x[k] = c->x[k] * 32.0; y[k] = c->y[k]; }
+            for (int k = 0; k < 4; k++) { x[k] = ov_wide_x(c->x[k]); y[k] = c->y[k]; }
             poly(4, x, y, ENH_PAIR(c->colour), c->or_mode);
         } else {
-            line_prim(c->x[0] * 32.0, c->y[0], c->x[1] * 32.0, c->y[1], 16, ENH_PAIR(c->colour));
+            line_prim(ov_wide_x(c->x[0]), c->y[0], ov_wide_x(c->x[1]), c->y[1], 16, ENH_PAIR(c->colour));
         }
     }
 }
@@ -740,13 +762,15 @@ void enh_scene_build(const EnhSnap *s, const EnhView *v)
     CX32 = W32 / 2;
     VROWS = s->chase ? ENH_CHASE_ROWS : s->rows;
     CXA = s->chase ? CX32 : (double)(s->cx_hi << 8);
+    SHIFT = enh_wide_cols * 32.0;                            /* OG widescreen: the extra columns */
+    W32 += 2 * SHIFT;
     enh_target_reset(&enh_front, (int)(W32 / 32), (int)VROWS, K);
     enh_target_reset(&enh_mirror, 88, 19, K);
     enh_front.light_max = enh_mirror.light_max = (u8)((s->day ? enh_beam_day : enh_beam_night) * 255 / 100);
     enh_front.light_soft = enh_mirror.light_soft = enh_beam_soft;
 
     /* how the samples map back to lines of sight, for the depth (enh_raster.c) */
-    EnhMap m = { false, CXA - v->heading, v->cam_row, v->roll_slope, CX32,
+    EnhMap m = { false, CXA - v->heading + SHIFT, v->cam_row, v->roll_slope, CX32 + SHIFT,
                  s->mirror_base, v->pitch, v->mroll_slope };
     enh_front.map = m;
     m.mirror = true;

@@ -264,8 +264,8 @@ static void raster_blocks(const EnhTarget *t, const EnhPrim *p, const EnhSnap *s
     u16 lc = lt_clear(t, p);
     for (int n = p->first; n < p->first + p->count; n++) {
         u32 e = snap->ovpix[n];
-        int off = (int)(e >> 8), c = off % 320, r = off / 320;
-        if (c >= wpx) continue;
+        int off = (int)(e >> 8), c = off % 320 + p->n, r = off / 320;   /* OG: p->n = widescreen column shift */
+        if (c < 0 || c >= wpx) continue;
         int ra = r * k, rb = ra + k;
         if (ra < y0) ra = y0;
         if (rb > y1) rb = y1;

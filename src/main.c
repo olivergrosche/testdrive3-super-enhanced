@@ -30,6 +30,7 @@
  *                 Game settings > Key Bindings; enhanced/enh_keys.c), applied while a race runs
  *   --finish-marker ENH: the direction of the leg's finish (the gas station) on the compass (default 1; 0 = off)
  *   --classic     ENH: the original's picture only (no enhanced view), at --res-scale (default 1)
+ *   --aspect      OG: picture shape: auto (the desktop's, default), 4:3 (the original), 16:9, 16:10, w:h
  *   --check       load and verify the original executable, print a summary and exit (no window)
  */
 #define SDL_MAIN_HANDLED
@@ -52,7 +53,8 @@ static int usage(const char *prog)
             "usage: %s [--game-dir DIR] [--scale N] [--fullscreen] [--frame-ticks N] [--sound adlib|speaker]\n"
             "          [--car CODE] [--course CODE] [--skill N] [--res-scale N] [--aa N] [--motion-delay P]\n"
             "          [--haze P] [--draw-distance N] [--fog-start P] [--beam-night P] [--beam-day P]\n"
-            "          [--beam-soft N] [--enh-lights 0|1] [--keys NAME=CODE,...] [--finish-marker 0|1] [--classic] [--check]\n", prog);
+            "          [--beam-soft N] [--enh-lights 0|1] [--keys NAME=CODE,...] [--finish-marker 0|1] [--classic] [--check]\n"
+            "          [--aspect auto|4:3|16:9|16:10|W:H]\n", prog);
     return 2;
 }
 
@@ -143,6 +145,14 @@ int main(int argc, char **argv)
         }
         else if (!strcmp(a, "--finish-marker") && v) { portcfg.finish_marker = atoi(v) != 0; i++; }
         else if (!strcmp(a, "--classic")) classic = true;
+        else if (!strcmp(a, "--aspect") && v) {                 /* OG: auto | 4:3 | 16:9 | 16:10 | w:h | number */
+            double w = 0, h = 0;
+            if (!SDL_strcasecmp(v, "auto")) host_set_aspect(0);
+            else if (sscanf(v, "%lf:%lf", &w, &h) == 2 && w > 0 && h > 0) host_set_aspect(w / h);
+            else if (sscanf(v, "%lf", &w) == 1 && w > 0) host_set_aspect(w);
+            else return usage(argv[0]);
+            i++;
+        }
         else if (!strcmp(a, "--check")) check = true;
         else return usage(argv[0]);
     }
@@ -165,6 +175,7 @@ int main(int argc, char **argv)
     }
 
     if (res_scale < 0) res_scale = classic ? 1 : ENH_DEFAULT_RES_SCALE;
+    if (classic) host_set_aspect(4.0 / 3.0);                   /* OG: the original's picture has no margins to fill */
     enh_init(!classic, res_scale, aa, motion_delay, haze, draw_dist);
     enh_init_look(fog_start, enh_lights, beam_night, beam_day, beam_soft);
     if (!host_init(dir, scale, fullscreen)) return 1;
