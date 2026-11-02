@@ -39,6 +39,7 @@ static void message_box_body(s16 id)
     if (id == 0x21) x = 0;                                  /* ENH: the reworded ticket message, from column 3 */
     flow_page(0);
     rect_save(x, (s16)(0x13f - x), 0x71, 0x85);
+    enh_msgbox(x, 0x13f - x, 0x71, 0x85);                  /* OG: the chase view leaves the box on top */
     gfx_set_colour(7);
     gfx_fill_rect(x, (s16)(0x13f - x), 0x71, 0x85);
     gfx_set_colour(0);
@@ -193,6 +194,7 @@ static void message_box_body(s16 id)
     DSB(DS_kbd_key) = 0;
 keep_key:
     if (keep_bg == 0) rect_restore(x, (s16)(0x13f - x), 0x71, 0x85);
+    if (keep_bg == 0) enh_msgbox_clear();                   /* OG */
     DSB(DS_clock_frames) = (u8)DSW(DS_tick_count);          /* quirk, game_flow.md §9 */
     flow_page(save_page);
     gfx_set_copy_page(1);

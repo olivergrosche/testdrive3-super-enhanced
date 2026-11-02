@@ -9,6 +9,7 @@
 #include <SDL3/SDL.h>
 
 #include "../host.h"
+#include "game/render.h"                /* OG: obj_emit_vehicle_moving, model_emit_faces (the chase view's car) */
 
 int enh_scale = ENH_DEFAULT_RES_SCALE, enh_aa = ENH_DEFAULT_AA, enh_motion_delay = ENH_DEFAULT_MOTION_DELAY;
 int enh_haze = ENH_DEFAULT_HAZE;
@@ -46,6 +47,218 @@ void enh_init_look(int fog_start, bool lights, int beam_night, int beam_day, int
 
 bool enh_enabled(void) { return enabled; }
 int  enh_res_scale(void) { return enh_scale; }
+
+/* ------------------------------------------------------------------------------------------------------
+ * OG: the chase view (CHASE.md). The game runs its cockpit view underneath; the enhanced view adds the
+ * player's car and looks at it from behind, over the whole screen.
+ * ------------------------------------------------------------------------------------------------------ */
+
+static bool chase_pref = ENH_CHASE_DEFAULT;
+static double chase_look_target;              /* right stick: -1 .. 1 of half a turn */
+static struct { bool on; int x0, x1, y0, y1; } msgbox;
+
+/* the camera: distance behind the eye, height over it, horizon row (TD3_CHASE="dist,height,row" to try others) */
+static double chase_dist = 720, chase_height = 135, chase_row = 66;
+#define CHASE_BEAM_NEAR 190.0                   /* the car's front ahead of the eye, units */
+static double chase_yaw_tau = 0.22;           /* s: how fast the camera swings round behind the car */
+
+void enh_chase_set(bool on) { chase_pref = on; }
+bool enh_chase_pref(void) { return chase_pref; }
+void enh_chase_toggle(void) { chase_pref = !chase_pref; }
+void enh_chase_look(double turn) { chase_look_target = turn < -1 ? -1 : turn > 1 ? 1 : turn; }
+void enh_msgbox(int x0, int x1, int y0, int y1)
+{
+    msgbox.on = true; msgbox.x0 = x0; msgbox.x1 = x1; msgbox.y0 = y0; msgbox.y1 = y1;
+}
+void enh_msgbox_clear(void) { msgbox.on = false; }
+
+static void chase_params(void)
+{
+    static bool done;
+    if (done) return;
+    done = true;
+    const char *vw = SDL_getenv("TD3_VIEW");             /* developer aid: TD3_VIEW=cockpit starts in the cockpit */
+    if (vw && !strcmp(vw, "cockpit")) chase_pref = false;
+    const char *e = SDL_getenv("TD3_CHASE");
+    double a, b, c;
+    if (e && sscanf(e, "%lf,%lf,%lf", &a, &b, &c) == 3) { chase_dist = a; chase_height = b; chase_row = c; }
+}
+
+/* the chase view applies to this frame: a race in the cockpit view (not F5, a replay or a crash) */
+static bool chase_now(void)
+{
+    return chase_pref && enh_keys_racing() && DSB(DS_ext_view) == 0 && DSB(DS_menu_preview) == 0;
+}
+
+/* The player's car is not built in the cockpit view (509b skips it). For the chase view it is emitted here,
+ * after the game's frame, into the game's arrays past their ends, taken into the snapshot and the game's
+ * state put back exactly as it was. */
+typedef struct {
+    u16 vert_count, face_count, vert_base, model_face_cut, cur_obj_slot1;
+    u16 place_x, place_z, place_y, place_x4, place_z4;
+    u8  vert_overflow, full_transform, place_rot, place_nverts, place_shear;
+    u16 ovb, ovc, ofb, ofc;
+} CarSave;
+static u8 car_save_v[3][2 * ENH_MAX_VERTS];
+static u8 car_save_f[10 * ENH_MAX_FACES];
+
+static void car_restore(const CarSave *k)
+{
+    u16 nv0 = k->vert_count, nf0 = k->face_count;
+    memcpy(mp(DGROUP, (u16)(DS_vert_x + 2 * nv0)), car_save_v[0], (size_t)2 * (ENH_MAX_VERTS - nv0));
+    memcpy(mp(DGROUP, (u16)(DS_vert_y + 2 * nv0)), car_save_v[1], (size_t)2 * (ENH_MAX_VERTS - nv0));
+    memcpy(mp(DGROUP, (u16)(DS_vert_z + 2 * nv0)), car_save_v[2], (size_t)2 * (ENH_MAX_VERTS - nv0));
+    memcpy(mp(DSW(DS_face_block + 2), (u16)(DSW(DS_face_block) + 10 * nf0)), car_save_f, (size_t)10 * (ENH_MAX_FACES - nf0));
+    DSW(DS_vert_count) = k->vert_count;   DSW(DS_face_count) = k->face_count;
+    DSW(DS_vert_base) = k->vert_base;     DSW(DS_model_face_cut) = k->model_face_cut;
+    DSW(DS_cur_obj_slot1) = k->cur_obj_slot1;
+    DSW(DS_place_x) = k->place_x;  DSW(DS_place_z) = k->place_z;  DSW(DS_place_y) = k->place_y;
+    DSW(DS_place_x4) = k->place_x4; DSW(DS_place_z4) = k->place_z4;
+    DSB(DS_vert_overflow) = k->vert_overflow; DSB(DS_obj_full_transform) = k->full_transform;
+    DSB(DS_place_rot) = k->place_rot; DSB(DS_place_nverts) = k->place_nverts; DSB(DS_place_shear) = k->place_shear;
+    DSW(DS_obj_vert_base) = k->ovb;  DSW(DS_obj_vert_count) = k->ovc;
+    DSW(DS_obj_face_base) = k->ofb;  DSW(DS_obj_face_count) = k->ofc;
+}
+
+static bool car_emit(CarSave *k)
+{
+    k->vert_count = DSW(DS_vert_count);   k->face_count = DSW(DS_face_count);
+    k->vert_base = DSW(DS_vert_base);     k->model_face_cut = DSW(DS_model_face_cut);
+    k->cur_obj_slot1 = DSW(DS_cur_obj_slot1);
+    k->place_x = DSW(DS_place_x);  k->place_z = DSW(DS_place_z);  k->place_y = DSW(DS_place_y);
+    k->place_x4 = DSW(DS_place_x4); k->place_z4 = DSW(DS_place_z4);
+    k->vert_overflow = DSB(DS_vert_overflow); k->full_transform = DSB(DS_obj_full_transform);
+    k->place_rot = DSB(DS_place_rot); k->place_nverts = DSB(DS_place_nverts); k->place_shear = DSB(DS_place_shear);
+    k->ovb = DSW(DS_obj_vert_base);  k->ovc = DSW(DS_obj_vert_count);
+    k->ofb = DSW(DS_obj_face_base);  k->ofc = DSW(DS_obj_face_count);
+    u16 nv0 = k->vert_count, nf0 = k->face_count;
+    if (nv0 >= 0x600 || nf0 >= 0x600) return false;      /* no room left (the game's arrays end at 630h / 640h) */
+    memcpy(car_save_v[0], mp(DGROUP, (u16)(DS_vert_x + 2 * nv0)), (size_t)2 * (ENH_MAX_VERTS - nv0));
+    memcpy(car_save_v[1], mp(DGROUP, (u16)(DS_vert_y + 2 * nv0)), (size_t)2 * (ENH_MAX_VERTS - nv0));
+    memcpy(car_save_v[2], mp(DGROUP, (u16)(DS_vert_z + 2 * nv0)), (size_t)2 * (ENH_MAX_VERTS - nv0));
+    memcpy(car_save_f, mp(DSW(DS_face_block + 2), (u16)(DSW(DS_face_block) + 10 * nf0)), (size_t)10 * (ENH_MAX_FACES - nf0));
+    DSB(DS_obj_full_transform) = 1;                       /* not 52a3's translated-vertex cache */
+    FarPtr faces;
+    u16 nf = obj_emit_vehicle_moving(0, 0, &faces);
+    if (DSB(DS_vert_overflow) != 0 || nf == 0) { car_restore(k); return false; }
+    DSW(DS_model_face_cut) = 0;
+    model_emit_faces(faces, nf);
+    if (DSW(DS_face_count) <= nf0) { car_restore(k); return false; }
+    return true;
+}
+
+/* The cockpit's headlight beams (headlight_beam_draw: two quads at fixed places in V, ORed in) as the patch of
+ * ground they show from the cockpit: each corner's line of sight met with the ground under the car (at most
+ * 3000 units ahead). Only when the game would draw them (lights on; by day only in rain or snow). */
+static void beam_capture(EnhSnap *s)
+{
+    s->beam_n = 0;
+    if (DSB(DS_headlights) == 0) return;
+    if (DSB(DS_colour_mode) != 0 && DSW(DS_rain_level) == 0 && DSW(DS_snow_level) == 0) return;
+    double ground = (s16)DSW(DS_obj_y8) / 8.0, h = s->cam_y - ground;
+    if (h < 8) h = 8;
+    double cxa = (double)(s->cx_hi << 8), bb[6], dd[6], dmin = 1e9;
+    for (int k = 0; k < 6; k++) {
+        double y = (s16)DSW(DS_beam_verts + 4 * k), x = (s16)DSW(DS_beam_verts + 4 * k + 2);
+        if (DSB(DS_half_window)) { y -= 0x10; x -= 0x500; }
+        bb[k] = (x - cxa + s->heading) * (2.0 * M_PI / 65536.0);
+        double e = (s->cam_row - y) * (M_PI / 1024.0);    /* elevation of the line of sight, radians */
+        dd[k] = e < -0.015 ? h / tan(-e) : 3000.0;
+        if (dd[k] > 3000.0) dd[k] = 3000.0;
+        if (dd[k] < dmin) dmin = dd[k];
+    }
+    /* the near edge, which the dashboard hides in the cockpit, starts at the car's front instead */
+    for (int k = 0; k < 6; k++) {
+        double d = dd[k] < dmin * 1.25 ? CHASE_BEAM_NEAR : dd[k];
+        s->beam_x[k] = s->cam_x4 + d * sin(bb[k]);
+        s->beam_z[k] = s->cam_z4 + d * cos(bb[k]);
+        s->beam_y[k] = ground + 2;
+    }
+    s->beam_n = 6;
+}
+
+/* the chase camera for a cockpit eye (x4, z4, y, heading): where it is and where it looks */
+typedef struct { double x4, z4, y, yaw; } ChaseCam;
+static double chase_yaw = 0.0, chase_look = 0.0;
+static bool chase_yaw_set;
+
+static ChaseCam chase_cam_at(double x4, double z4, double y, double yaw)
+{
+    double a = yaw * (2.0 * M_PI / 65536.0);
+    ChaseCam c = { x4 - chase_dist * sin(a), z4 - chase_dist * cos(a), y + chase_height, yaw };
+    return c;
+}
+
+/* 361c's key of a face of the snapshot as seen from (cx, cy, cz) */
+static double face_key_from(const EnhSnap *s, int f, double cx, double cy, double cz)
+{
+    const u16 *r = s->face[f];
+    int n = r[0] >> 14, vv[4] = { r[0] & 0x7FF, r[1] & 0x7FF, r[2] & 0x7FF, r[3] & 0x7FF };
+    double d[4];
+    for (int k = 0; k < 4; k++) {
+        int v = vv[k] < s->nv ? vv[k] : vv[0];
+        double dx = (s16)(u16)((u16)s->vx[v] - (u16)(s32)cx), dz = (s16)(u16)((u16)s->vz[v] - (u16)(s32)cz);
+        d[k] = fabs(s->vy[v] - cy) + sqrt(dx * dx + dz * dz);
+    }
+    if (n == 0) return d[0];
+    if (r[0] & 0x2000) {
+        double k = fmax(d[0], d[1]);
+        if (n >= 2) k = fmax(k, d[2]);
+        if (n == 3) k = fmax(k, d[3]);
+        return k;
+    }
+    if (n == 1) return (d[0] + d[1]) / 2;
+    if (n == 2) return (d[0] + d[1] + d[2]) * 11.0 / 32.0;
+    return (d[0] + d[1] + d[2] + d[3]) / 4;
+}
+
+/* The car's faces: brake lights and the lamps that show by side (4db6's runtime colours, the leading faces of
+ * types 4..13), seen from the chase camera; then drawn after everything else, farthest first. */
+static void car_faces_finish(EnhSnap *s)
+{
+    ChaseCam cc = chase_cam_at(s->cam_x4, s->cam_z4, s->cam_y, s->heading);
+    double facing = s->heading;                           /* the car faces the cockpit camera's heading */
+    for (int f = s->car_f0; f < s->car_f0 + s->car_nf; f++) {
+        u16 *r = s->face[f];
+        u8 type = (u8)(r[3] >> 11);
+        if (type < 4 || type > 13) break;
+        if (type == 13) break;                            /* wipers: model animation, ends the scan */
+        u16 ax;
+        if (type == 9) ax = DSB(DS_brake) ? 0x0C0C : 0x0404;          /* brake light */
+        else if (type == 8) ax = (DSB(DS_frame8) & 7) == 0 ? 0x0F0F : 0;
+        else if (type >= 10) continue;                    /* beacon, traffic lamp, flasher: not on the player's car */
+        else if (type == 7) continue;
+        else {
+            u16 bp;
+            if (type == 6) { ax = 0x0E0E; bp = 0; }
+            else if (type == 4) { ax = 0x0404; bp = 0x0F0F; }
+            else { ax = 0x0F0F; bp = 0; }
+            int v = r[0] & 0x7FF;
+            if (v >= s->nv) continue;
+            double dx = (s16)(u16)((u16)s->vx[v] - (u16)(s32)cc.x4), dz = (s16)(u16)((u16)s->vz[v] - (u16)(s32)cc.z4);
+            double bearing = atan2(dx, dz) * (65536.0 / (2.0 * M_PI));
+            u16 d = (u16)(s32)floor(facing - bearing);
+            if (d < 0x8000) ax = bp;
+        }
+        r[4] = ax;
+    }
+    /* order: the car's faces drawn last (order[] is nearest first), among themselves by their key from the
+     * chase camera */
+    static int idx[ENH_MAX_FACES];
+    static double key[ENH_MAX_FACES];
+    int n = s->car_nf;
+    for (int i = 0; i < n; i++) {
+        idx[i] = s->car_f0 + i;
+        key[i] = face_key_from(s, s->car_f0 + i, cc.x4, cc.y, cc.z4);
+    }
+    for (int i = 1; i < n; i++)                           /* insertion sort, nearest first */
+        for (int j = i; j > 0 && key[j] < key[j - 1]; j--) {
+            double tk = key[j]; key[j] = key[j - 1]; key[j - 1] = tk;
+            int ti = idx[j]; idx[j] = idx[j - 1]; idx[j - 1] = ti;
+        }
+    memmove(s->order + n, s->order, sizeof s->order[0] * (size_t)s->car_f0);
+    for (int i = 0; i < n; i++) s->order[i] = (u16)idx[i];
+}
 
 /* ------------------------------------------------------------------------------------------------------
  * Cockpit overlays: recorded while frame_draw runs, moved into the snapshot by enh_frame_drawn.
@@ -177,6 +390,16 @@ void enh_frame_drawn(void)
     enh_cur = t;
     EnhSnap *s = enh_cur;
 
+    /* OG: the chase view: the player's car into the game's arrays for this snapshot (put back at the end) */
+    chase_params();
+    CarSave car_saved;
+    s->chase = chase_now();
+    bool car = s->chase && car_emit(&car_saved);
+    s->car_v0 = car ? car_saved.vert_count : 0;
+    s->car_nv = car ? DSW(DS_vert_count) - car_saved.vert_count : 0;
+    s->car_f0 = car ? car_saved.face_count : DSW(DS_face_count);
+    s->car_nf = car ? DSW(DS_face_count) - car_saved.face_count : 0;
+
     s->valid = true;
     s->t_ns = host_tick_ns();
     s->frame_counter = DSW(DS_frame_counter);
@@ -184,7 +407,7 @@ void enh_frame_drawn(void)
     s->cx_hi = DSB(DS_view_cx_hi);
     s->rows = DSW(DS_view_rows);
     s->mirror_base = DSW(DS_mirror_base);
-    s->mirror_on = DSB(DS_mirror_on) != 0 && DSB(DS_external_panel_on) == 0;
+    s->mirror_on = DSB(DS_mirror_on) != 0 && DSB(DS_external_panel_on) == 0 && !s->chase;
     s->ext_view = DSB(DS_ext_view) != 0;
     s->menu_preview = DSB(DS_menu_preview) != 0;
     s->day = DSB(DS_colour_mode) != 0;
@@ -204,6 +427,7 @@ void enh_frame_drawn(void)
     s->cam_row = DSS(DS_cam_row);
     s->pitch = DSS(DS_pitch);
     s->roll = DSC(DS_cam_roll_94A0);
+    if (s->chase) beam_capture(s); else s->beam_n = 0;   /* OG */
 
     s->sky_pair = DSW(DS_sky_pair);
     s->ground_pair = DSW(DS_ground_pair);
@@ -214,6 +438,8 @@ void enh_frame_drawn(void)
     if (s->nv > ENH_MAX_VERTS) s->nv = ENH_MAX_VERTS;
     s->nf = DSW(DS_face_count);
     if (s->nf > ENH_MAX_FACES) s->nf = ENH_MAX_FACES;
+    if (s->car_f0 > s->nf) s->car_f0 = s->nf;
+    if (s->car_f0 + s->car_nf > s->nf) s->car_nf = s->nf - s->car_f0;
     s->static_vert_end = DSW(DS_parked_vert_end);
     for (int v = 0; v < s->nv; v++) {
         s->vx[v] = DSS(DS_vert_x + 2 * v);
@@ -225,10 +451,11 @@ void enh_frame_drawn(void)
         for (int k = 0; k < 5; k++) s->face[f][k] = rd16(fseg, (u16)(fbase + 10 * f + 2 * k));
     /* the order the game sorted them in (faces_sort_keys): drawing in it keeps coplanar faces (road markings,
      * decals) in the same order between the game's frames instead of swapping as their keys cross */
-    for (int i = 0; i < s->nf; i++) {
+    for (int i = 0; i < s->car_f0; i++) {                 /* OG: the game's faces (the car's follow) */
         u16 idx = (u16)((u16)(rd16(fseg, (u16)(DSW(DS_order_ofs) + 2 * i)) - fbase) / 10);
-        s->order[i] = idx < s->nf ? idx : (u16)i;
+        s->order[i] = idx < s->car_f0 ? idx : (u16)i;
     }
+    for (int i = s->car_f0; i < s->nf; i++) s->order[i] = (u16)i;
     for (int k = 0; k < 4; k++) {
         s->point_sizes[k] = DSB(DS_point_sizes + k);
         s->line_widths[k] = DSB(DS_line_widths + k);
@@ -250,6 +477,7 @@ void enh_frame_drawn(void)
          * car would be drawn out of place. */
         bool moving = (e->flags & 0x2000) && n && b >= s->static_vert_end && b + n <= s->nv &&
                       !(o == 0 && !s->ext_view);
+        if (o == 0 && s->chase) moving = false;           /* OG: placed with the chase camera (view_compute) */
         e->vbase = moving ? b : 0;
         e->vcount = moving ? n : 0;
         e->rbase = b;
@@ -275,17 +503,21 @@ void enh_frame_drawn(void)
     for (int k = 0; k < 32; k++) s->sprite_kind[k] = DSB(DS_sprite_kind + k);
     s->sprite_max_size = DSB(DS_sprite_max_size);
 
-    s->novcmd = ov.ncmd;
-    s->novpix = ov.npix;
-    memcpy(s->ov, ov.cmd, sizeof(EnhOvCmd) * (size_t)ov.ncmd);
-    memcpy(s->ovpix, ov.pix, sizeof(u32) * (size_t)ov.npix);
+    s->novcmd = s->chase ? 0 : ov.ncmd;                   /* OG: no windscreen, dashboard edge or wipers outside */
+    s->novpix = s->chase ? 0 : ov.npix;
+    memcpy(s->ov, ov.cmd, sizeof(EnhOvCmd) * (size_t)s->novcmd);
+    memcpy(s->ovpix, ov.pix, sizeof(u32) * (size_t)s->novpix);
     ov.ncmd = ov.npix = 0;
     memcpy(s->vbuf, vbuf_ptr(), sizeof s->vbuf);
+    if (car) {                                            /* OG: the game's state as it was */
+        car_restore(&car_saved);
+        car_faces_finish(s);
+    }
     enh_far_build(s);                                      /* the cells beyond the game's own */
 
     /* A continuous step: same kind of view, nothing jumped (restart, replay start, layout change). */
     EnhSnap *p = enh_prev;
-    pair_ok = p->valid && p->ext_view == s->ext_view && p->menu_preview == s->menu_preview &&
+    pair_ok = p->valid && p->ext_view == s->ext_view && p->menu_preview == s->menu_preview && p->chase == s->chase &&
               p->w32m == s->w32m && p->rows == s->rows &&
               abs(d16(s->cam_x4, p->cam_x4)) < 0x1800 && abs(d16(s->cam_z4, p->cam_z4)) < 0x1800 &&
               abs(s->cam_y - p->cam_y) < 0x200 && abs(d16(s->heading, p->heading)) < 0x2000 &&
@@ -348,6 +580,56 @@ static double frame_period(u64 t_new, u64 t_old)
 {
     double period = (double)(t_new - t_old), nominal = TICK_NS * host_frame_ticks();
     return period > 2.0 * nominal || period <= 0 ? nominal : period;
+}
+
+/* OG: the chase view's camera and car at the view time. eye = the cockpit camera as the view interpolates it
+ * (x4, z4, heading, y). The car's vertices keep their place relative to that eye (so the car does not shake
+ * against the camera that follows it); the camera hangs behind it, swinging round with chase_yaw_tau. */
+static void chase_view(EnhView *v, const EnhSnap *c, const double *eye, u64 now)
+{
+    static u64 last;
+    double dt = last ? (double)(s64)(now - last) / 1e9 : 0.0;
+    last = now;
+    if (dt < 0 || dt > 0.25) dt = 0.25;
+
+    double dh = eye[2] - c->heading;                      /* the car's turn since the snapshot */
+    dh -= floor(dh / 65536.0 + 0.5) * 65536.0;
+    double r = dh * (2.0 * M_PI / 65536.0), cs = cos(r), sn = sin(r);
+    for (int i = c->car_v0; i < c->car_v0 + c->car_nv; i++) {
+        double rx = (s16)(u16)((u16)c->vx[i] - (u16)c->cam_x4), rz = (s16)(u16)((u16)c->vz[i] - (u16)c->cam_z4);
+        v->vx[i] = (float)(eye[0] + rx * cs + rz * sn);
+        v->vz[i] = (float)(eye[1] + rz * cs - rx * sn);
+        v->vy[i] = (float)(c->vy[i] - c->cam_y + eye[3]);
+    }
+    v->obj_heading[0] = eye[2] - 0x4000;                  /* objects face their heading + 4000h */
+    v->beam_n = c->beam_n;
+    for (int k = 0; k < c->beam_n; k++) {
+        double rx = c->beam_x[k] - c->cam_x4, rz = c->beam_z[k] - c->cam_z4;
+        v->beam_vx[k] = eye[0] + rx * cs + rz * sn;
+        v->beam_vz[k] = eye[1] + rz * cs - rx * sn;
+        v->beam_vy[k] = c->beam_y[k] - c->cam_y + eye[3];
+    }
+
+    if (!chase_yaw_set || !pair_ok) { chase_yaw = eye[2]; chase_look = chase_look_target; chase_yaw_set = true; }
+    else {
+        double d = eye[2] - chase_yaw;
+        d -= floor(d / 65536.0 + 0.5) * 65536.0;
+        chase_yaw += d * (1.0 - exp(-dt / chase_yaw_tau));
+        chase_look += (chase_look_target - chase_look) * (1.0 - exp(-dt / 0.08));
+    }
+    ChaseCam cc = chase_cam_at(eye[0], eye[1], eye[3], chase_yaw + chase_look * 32768.0);
+    /* over the ground under the camera (a crest behind the car, a bank beside it) */
+    double g = enh_ground_height(c, cc.x4, cc.z4, cc.y, 150.0);
+    if (cc.y < g + 3 * ENH_EYE_CLEAR) cc.y = g + 3 * ENH_EYE_CLEAR;
+    v->cam_x4 = cc.x4;
+    v->cam_z4 = cc.z4;
+    v->cam_y = cc.y;
+    v->heading = cc.yaw - floor(cc.yaw / 65536.0) * 65536.0;
+    v->cam_row = chase_row;
+    v->pitch = 0;
+    v->roll_slope = 0;
+    v->mroll_slope = 0;
+    v->roll = 0;
 }
 
 static void view_compute(void)
@@ -469,6 +751,11 @@ static void view_compute(void)
             v->vy[i] = (float)(c->vy[i] + dy);
         }
     }
+    v->beam_n = 0;
+    if (c->chase && !compare_on()) {                      /* OG: the eye before the cockpit's ground clearance */
+        double eye[4] = { out[0], out[1], out[2], out[3] };
+        chase_view(v, c, eye, now);
+    }
 
     /* sprites: the ones that move (the fixed instances 0..8 such as the sun and the moon, drifting clouds and
      * birds, crash debris) carried like the camera. The rest never move, and the tiles' children are handed out
@@ -573,6 +860,105 @@ static void paste_front_row(int r, void *vctx)
     }
 }
 
+/* OG: the chase view covers the whole screen but for the cockpit's instruments, which stay on top of it as the
+ * game draws them: the two top panels (compass and clock, radar detector), the rev counter and the speedometer
+ * (ellipses: the VGA's pixels are tall) and the gear lever's window; and a message box while one is up. */
+typedef struct { double cx, cy, rx, ry; } HudOval;
+static const HudOval hud_ovals[] = { { 92.5, 154.0, 22.5, 19.0 }, { 138.5, 154.0, 22.5, 19.0 } };
+typedef struct { int x0, y0, x1, y1; } HudRect;                     /* [x0, x1) x [y0, y1) */
+/* in place: the top panels (compass and clock, radar detector) */
+static const HudRect hud_rects[] = { { 6, 5, 65, 16 }, { 263, 4, 317, 16 } };
+/* moved out of the car's way: the dials (cut out as the two ovals) to the bottom left, the gear lever's window
+ * to the bottom right. Source rectangle, then where its top left corner goes. */
+typedef struct { HudRect src; int dx0, dy0; bool ovals; } HudMove;
+static const HudMove hud_moves[] = {
+    { { 68, 133, 164, 177 }, 3, 154, true },
+    { { 248, 124, 304, 172 }, 263, 151, false },
+};
+#define HUD_NMOVES ((int)(sizeof hud_moves / sizeof hud_moves[0]))
+
+/* how much of the dials shows at the source point (x, y), 0..1; aa = an output pixel in VGA pixels */
+static double hud_oval_cover(double x, double y, double aa)
+{
+    double best = 0.0;
+    for (size_t i = 0; i < sizeof hud_ovals / sizeof hud_ovals[0]; i++) {
+        const HudOval *o = &hud_ovals[i];
+        double dx = (x - o->cx) / o->rx, dy = (y - o->cy) / o->ry, d = sqrt(dx * dx + dy * dy);
+        double c = (1.0 - d) * o->rx / aa + 0.5;          /* the edge over one output pixel */
+        if (c > best) best = c > 1.0 ? 1.0 : c;
+    }
+    return best;
+}
+
+/* the view pixel (c, r) stays the VGA picture (a top panel, a message box) */
+static bool hud_keep(int c, int r)
+{
+    if (msgbox.on && c >= msgbox.x0 && c <= msgbox.x1 && r >= msgbox.y0 && r <= msgbox.y1) return true;
+    for (size_t i = 0; i < sizeof hud_rects / sizeof hud_rects[0]; i++) {
+        const HudRect *h = &hud_rects[i];
+        if (c >= h->x0 && c < h->x1 && r >= h->y0 && r < h->y1) return true;
+    }
+    return false;
+}
+
+/* the moved instruments: taken from the scaled VGA picture before the view covers it, laid over it after */
+static u32 *hud_buf[HUD_NMOVES];
+static int hud_buf_scale;
+
+static void hud_take(const u32 *xrgb)
+{
+    int S = enh_scale, W = 320 * S;
+    if (hud_buf_scale != S) {
+        for (int m = 0; m < HUD_NMOVES; m++) {
+            const HudRect *r = &hud_moves[m].src;
+            SDL_free(hud_buf[m]);
+            hud_buf[m] = SDL_malloc(sizeof(u32) * (size_t)((r->x1 - r->x0) * S) * (size_t)((r->y1 - r->y0) * S));
+        }
+        hud_buf_scale = S;
+    }
+    for (int m = 0; m < HUD_NMOVES; m++) {
+        const HudRect *r = &hud_moves[m].src;
+        int w = (r->x1 - r->x0) * S, h = (r->y1 - r->y0) * S;
+        if (!hud_buf[m]) continue;
+        for (int j = 0; j < h; j++)
+            memcpy(hud_buf[m] + (size_t)j * w, xrgb + (size_t)(r->y0 * S + j) * W + (size_t)r->x0 * S, sizeof(u32) * (size_t)w);
+    }
+}
+
+static void hud_put(u32 *xrgb)
+{
+    int S = enh_scale, W = 320 * S;
+    for (int m = 0; m < HUD_NMOVES; m++) {
+        const HudMove *mv = &hud_moves[m];
+        const HudRect *r = &mv->src;
+        int w = (r->x1 - r->x0) * S, h = (r->y1 - r->y0) * S;
+        if (!hud_buf[m]) continue;
+        if (!mv->ovals && DSB(DS_look_rect_dirty) == 0) continue;   /* the lever's window: only while it is up */
+        for (int j = 0; j < h; j++) {
+            int oy = mv->dy0 * S + j;
+            if (oy < 0 || oy >= 200 * S) continue;
+            for (int i = 0; i < w; i++) {
+                int ox = mv->dx0 * S + i;
+                if (ox < 0 || ox >= W) continue;
+                double k = mv->ovals ? hud_oval_cover(r->x0 + (i + 0.5) / S, r->y0 + (j + 0.5) / S, 1.0 / S) : 1.0;
+                if (k <= 0.0) continue;
+                u32 *o = xrgb + (size_t)oy * W + ox, src = hud_buf[m][(size_t)j * w + i];
+                *o = k >= 1.0 ? src : mix_rgb(*o, src, (u32)(k * 256.0));
+            }
+        }
+    }
+}
+
+static void paste_chase_row(int r, void *vctx)
+{
+    const PasteCtx *pc = vctx;
+    int S = enh_scale, A = enh_aa, W = 320 * S;
+    const EnhTarget *t = &enh_front;
+    (void)A; (void)W;
+    for (int c = 0; c < ENH_CHASE_W; c++)
+        if (!hud_keep(c, r)) paste_block(pc->out, c * S, r * S, t, c, r);
+}
+
 /* the part of M that mirror_present copies (rounded top), without the frame mirror_frame_draw paints */
 static bool mirror_pixel(int c, int r)
 {
@@ -611,9 +997,15 @@ bool enh_compose(u32 *xrgb, const u32 pal[256])
     cpal = pal;
     haze_rgb = pair_rgb(enh_haze_colour(s));
     PasteCtx pc = { xrgb, mp(0xA000, 0) };
-    int rows = enh_present.rows < s->rows ? enh_present.rows : s->rows;
-    host_parallel_for(rows, paste_front_row, &pc);
-    if (enh_present.mirror && s->mirror_on && enh_present.hole) host_parallel_for(19, paste_mirror_row, &pc);
+    if (s->chase && !compare_on()) {                      /* OG: the whole screen but the instruments */
+        hud_take(xrgb);
+        host_parallel_for(ENH_CHASE_ROWS, paste_chase_row, &pc);
+        hud_put(xrgb);
+    } else {
+        int rows = enh_present.rows < s->rows ? enh_present.rows : s->rows;
+        host_parallel_for(rows, paste_front_row, &pc);
+        if (enh_present.mirror && s->mirror_on && enh_present.hole) host_parallel_for(19, paste_mirror_row, &pc);
+    }
 
     /* Developer aid: TD3_ENH_LOG=file appends one line per displayed frame (time, phase, camera, cost). */
     static FILE *log;

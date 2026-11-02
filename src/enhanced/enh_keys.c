@@ -96,6 +96,8 @@ bool enh_keys_parse(const char *spec)
 
 void enh_keys_race(bool on) { racing = on; }
 void enh_keys_suspend(bool on) { suspended = on; }
+bool enh_keys_racing(void) { return racing; }
+bool enh_keys_suspended(void) { return suspended; }
 
 static int push(u16 *out, int n, u16 key, bool down)
 {

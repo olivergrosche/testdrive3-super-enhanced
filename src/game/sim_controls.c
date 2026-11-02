@@ -531,6 +531,22 @@ void steer_frame(void)
     if (spd > 1) spd = 1;
     double rate = 1.0 / (0.28 + 0.62 * spd);          /* centre to lock: 0.28 s standing, 0.9 s flat out */
     u8 k = (u8)(DSB(DS_prev_bits) & 0x0C);
+    /* OG: the gamepad's left stick (host.c) steers directly, until a steering key is pressed. Full deflection
+     * is full lock standing and PAD_LOCK_FAST of it flat out (the stick reaches it at once, the keys in 0.9 s);
+     * the wheel follows the stick at most PAD_RATE locks a second. */
+    if (k == 4 || k == 8) host_pad_steer_off();
+    else {
+        double pad;
+        if (host_pad_steer(&pad)) {
+            const double PAD_LOCK_FAST = 0.55, PAD_RATE = 4.0;
+            double target = pad * (1.0 - (1.0 - PAD_LOCK_FAST) * spd), step = PAD_RATE * dt;
+            double d = target - steer_pos;
+            steer_pos += d > step ? step : d < -step ? -step : d;
+            steer_held = 0;
+            DSB(DS_steer_wheel) = (u8)lround(0x10 + 0x10 * steer_pos);
+            return;
+        }
+    }
     if (k == 4 || k == 8) {
         double dir = k == 8 ? 1.0 : -1.0;
         steer_held += dt;

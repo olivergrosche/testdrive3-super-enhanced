@@ -33,7 +33,12 @@ else()
         set_source_files_properties(${TD_ENHANCED_SOURCES} PROPERTIES COMPILE_OPTIONS -O2)
     endif()
 endif()
-if(WIN32)
+get_target_property(TD_SDL3_TYPE SDL3::SDL3 TYPE)
+if(TD_SDL3_TYPE STREQUAL "ALIAS")
+    get_target_property(TD_SDL3_REAL SDL3::SDL3 ALIASED_TARGET)
+    get_target_property(TD_SDL3_TYPE ${TD_SDL3_REAL} TYPE)
+endif()
+if(WIN32 AND NOT TD_SDL3_TYPE STREQUAL "STATIC_LIBRARY")   # a static SDL3 has no DLL to copy
     add_custom_command(TARGET testdrive3-enhanced POST_BUILD
         COMMAND ${CMAKE_COMMAND} -E copy_if_different $<TARGET_RUNTIME_DLLS:testdrive3-enhanced> $<TARGET_FILE_DIR:testdrive3-enhanced>
         COMMAND_EXPAND_LISTS)

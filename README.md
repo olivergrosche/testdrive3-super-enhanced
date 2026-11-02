@@ -89,6 +89,11 @@ cmake --build build
 * F10 replay, F9 pause replay. Esc: leave.
 * Ctrl-P pause, Ctrl-S sound, Ctrl-Q music, Ctrl-E engine sound, Ctrl-J joystick, Ctrl-K keyboard.
 * The launcher's Game settings > Key Bindings changes the driving, car and game keys.
+* F8: drive in the chase view (the default) or the cockpit (fork og1, `CHASE.md`). F5 is still the original's
+  frozen look-around view.
+* Gamepad: RT gas, LT brake, left stick steering, A handbrake, B / RB shift up, X / LB shift down,
+  Y chase view / cockpit, right stick look around (pull back: behind), Start pause, Back leave,
+  d-pad lights / wipers / radio / mirror, L3 back to road, R3 replay. Menus: d-pad, A, B (`CHASE.md`).
 
 ## Layout
 

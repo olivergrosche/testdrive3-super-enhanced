@@ -88,6 +88,22 @@ int enh_key_map(u16 x, bool down, u16 *out);
 void enh_keys_focus_lost(void);       /* platform/kbd.c: every key counts as up */
 void enh_keys_race(bool on);          /* race_run: the bindings apply while a race runs */
 void enh_keys_suspend(bool on);       /* message_box: ... but not to a message box's answer */
+bool enh_keys_racing(void);           /* OG: a race runs (host.c gamepad: driving controls) */
+bool enh_keys_suspended(void);        /* OG: ... and a message box waits for its answer */
+
+/* ---- OG: chase camera (enhanced.c, CHASE.md) ----
+ * The game keeps running its cockpit view (physics, collisions and the clock read the ground under the cockpit
+ * camera); only the enhanced view is drawn from behind the car, over the whole screen, with the cockpit's
+ * gauges, gear box and top panels laid over it. Not in the original's external views (F5, replays, crashes). */
+#define ENH_CHASE_DEFAULT true
+void enh_chase_set(bool on);
+bool enh_chase_pref(void);
+void enh_chase_toggle(void);
+/* host.c gamepad: the right stick looks around in the chase view, -1 .. 1 of half a turn (+ = right) */
+void enh_chase_look(double turn);
+/* message_box (flow_screens.c): the box from x0 to x1, rows y0..y1, is on the screen until cleared */
+void enh_msgbox(int x0, int x1, int y0, int y1);
+void enh_msgbox_clear(void);
 
 /* platform/vga.c compose: the VGA picture has been scaled into xrgb (320*S x 200*S); lay the enhanced view
  * over it. pal = the DAC as XRGB. Returns true while the enhanced view is shown (the picture changes with

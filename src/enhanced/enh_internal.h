@@ -60,6 +60,14 @@ typedef struct {
     bool mirror_on;                    /* the mirror pass ran (B6D2, not in the replay layout) */
     bool ext_view, menu_preview;
     bool day;                          /* DS:95C7 colour mode: OR faces of pair 0707h are hidden by day */
+    /* OG: the chase view (CHASE.md): the player's car added from vertex car_v0 (car_nv of them) and face car_f0
+     * (car_nf), drawn last; the view covers the whole screen */
+    bool chase;
+    int  car_v0, car_nv, car_f0, car_nf;
+    /* OG: the cockpit's headlight beams (a screen overlay there) put back on the ground in front of the car:
+     * two quads 0-3 and 2-5, world coordinates (beam_n = 0: none) */
+    int  beam_n;
+    double beam_x[6], beam_y[6], beam_z[6];
     /* camera */
     u16  cam_x4, cam_z4, heading;
     s16  cam_y, cam_row, pitch;        /* cam_row = pitch + horizon base (9496); pitch = car pitch 948F */
@@ -119,6 +127,10 @@ extern int enh_scale, enh_aa, enh_motion_delay, enh_haze, enh_draw_dist;
 extern int enh_fog_start, enh_beam_night, enh_beam_day, enh_beam_soft;
 extern bool enh_lights;
 
+/* OG: the chase view's screen: the whole 320 x 200 picture */
+#define ENH_CHASE_W    320
+#define ENH_CHASE_ROWS 200
+
 /* ---- the smooth view state of one displayed frame (enhanced.c) ---- */
 typedef struct {
     double cam_x4, cam_z4, cam_y, heading, cam_row, pitch;
@@ -130,6 +142,9 @@ typedef struct {
     /* per object: heading at the view time (u16 units, unwrapped) */
     double obj_heading[ENH_MAX_OBJS];
     float  spr_x[ENH_MAX_SPRITES_ALL], spr_y[ENH_MAX_SPRITES_ALL], spr_z[ENH_MAX_SPRITES_ALL];
+    /* OG: the chase view's headlight beams at the view time */
+    int    beam_n;
+    double beam_vx[6], beam_vy[6], beam_vz[6];
 } EnhView;
 
 /* ---- the far ring (enh_far.c) ---- */

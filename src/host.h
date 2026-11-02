@@ -65,6 +65,13 @@ void host_mouse_motion(s16 *dx, s16 *dy);
  * bit1 = B. */
 bool host_joy_read(s16 *x, s16 *y, u8 *buttons);
 
+/* ---- OG: modern gamepad controls (CHASE.md "Gamepad"). While a race runs the pad drives the game through
+ * the keys it would press (triggers = Up / Down, buttons = the action keys), and the left stick steers:
+ * host_pad_steer gives its wheel position -1 .. 1 while it is the steering source (it was moved since the
+ * last steering key; host_pad_steer_off = a key was pressed). In the menus it is the cursor keys and Enter / Esc. */
+bool host_pad_steer(double *pos);
+void host_pad_steer_off(void);
+
 /* ---- Audio. The sound driver writes OPL2 registers and the PC speaker as the original does; writes
  * take effect from the current tick onward (sound.md, port design). */
 void host_opl_write(u8 reg, u8 value);

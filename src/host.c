@@ -1,6 +1,7 @@
 #include "host.h"
 
 #include <SDL3/SDL.h>
+#include <math.h>
 #include <stdarg.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -46,6 +47,7 @@ static float mouse_dx, mouse_dy;
 static int frame_ticks = HOST_DEFAULT_FRAME_TICKS;
 
 static void process_events(void);
+static void pad_update(void);   /* OG: gamepad controls */
 
 bool host_init(const char *dir, int window_scale, bool fullscreen)
 {
@@ -226,9 +228,68 @@ static void scripted_keys(void)
     spec = *p == ',' ? p + 1 : NULL;
 }
 
+/* OG developer aid: TD3_PAD="<seconds>:<ctl>=<value>[+<ctl>=<value>...],..." drives a virtual gamepad from that
+ * many seconds after start-up: ctl = lx ly rx ry (-1..1), lt rt (0..1), or a button a b x y lb rb start back up
+ * down left right ls rs (1 = down, 0 = up). "10:rt=1,14:lx=-0.5+a=1,15:lx=0+a=0". */
+static SDL_Joystick *vpad;
+static void scripted_pad(void)
+{
+    static const char *spec;
+    static bool checked;
+    if (!checked) {
+        checked = true;
+        spec = SDL_getenv("TD3_PAD");
+        if (spec) {
+            SDL_VirtualJoystickDesc d;
+            SDL_INIT_INTERFACE(&d);
+            d.type = SDL_JOYSTICK_TYPE_GAMEPAD;
+            d.naxes = SDL_GAMEPAD_AXIS_COUNT;
+            d.nbuttons = SDL_GAMEPAD_BUTTON_COUNT;
+            d.name = "TD3 test pad";
+            SDL_JoystickID id = SDL_AttachVirtualJoystick(&d);
+            vpad = id ? SDL_OpenJoystick(id) : NULL;
+            if (!vpad) fprintf(stderr, "TD3_PAD: no virtual pad: %s\n", SDL_GetError());
+        }
+    }
+    if (!spec || !*spec || !vpad) return;
+    char *end;
+    double at = SDL_strtod(spec, &end);
+    if (end == spec || *end != ':') { spec = NULL; return; }
+    if ((double)(SDL_GetTicksNS() - clock_start_ns) / 1e9 < at) return;
+    static const struct { const char *n; int axis, button; } ctl[] = {
+        { "lx", SDL_GAMEPAD_AXIS_LEFTX, -1 }, { "ly", SDL_GAMEPAD_AXIS_LEFTY, -1 },
+        { "rx", SDL_GAMEPAD_AXIS_RIGHTX, -1 }, { "ry", SDL_GAMEPAD_AXIS_RIGHTY, -1 },
+        { "lt", SDL_GAMEPAD_AXIS_LEFT_TRIGGER, -1 }, { "rt", SDL_GAMEPAD_AXIS_RIGHT_TRIGGER, -1 },
+        { "a", -1, SDL_GAMEPAD_BUTTON_SOUTH }, { "b", -1, SDL_GAMEPAD_BUTTON_EAST },
+        { "x", -1, SDL_GAMEPAD_BUTTON_WEST }, { "y", -1, SDL_GAMEPAD_BUTTON_NORTH },
+        { "lb", -1, SDL_GAMEPAD_BUTTON_LEFT_SHOULDER }, { "rb", -1, SDL_GAMEPAD_BUTTON_RIGHT_SHOULDER },
+        { "start", -1, SDL_GAMEPAD_BUTTON_START }, { "back", -1, SDL_GAMEPAD_BUTTON_BACK },
+        { "up", -1, SDL_GAMEPAD_BUTTON_DPAD_UP }, { "down", -1, SDL_GAMEPAD_BUTTON_DPAD_DOWN },
+        { "left", -1, SDL_GAMEPAD_BUTTON_DPAD_LEFT }, { "right", -1, SDL_GAMEPAD_BUTTON_DPAD_RIGHT },
+        { "ls", -1, SDL_GAMEPAD_BUTTON_LEFT_STICK }, { "rs", -1, SDL_GAMEPAD_BUTTON_RIGHT_STICK },
+    };
+    const char *p = end + 1;
+    for (;;) {
+        const char *eq = SDL_strchr(p, '=');
+        if (!eq) { spec = NULL; return; }
+        double v = SDL_strtod(eq + 1, &end);
+        for (size_t i = 0; i < sizeof ctl / sizeof ctl[0]; i++) {
+            if ((size_t)(eq - p) != SDL_strlen(ctl[i].n) || SDL_strncmp(p, ctl[i].n, (size_t)(eq - p))) continue;
+            if (ctl[i].axis >= 0) SDL_SetJoystickVirtualAxis(vpad, ctl[i].axis, (Sint16)SDL_clamp(v * 32767.0, -32768.0, 32767.0));
+            else SDL_SetJoystickVirtualButton(vpad, ctl[i].button, v != 0);
+        }
+        p = end;
+        if (*p != '+') break;
+        p++;
+    }
+    spec = *p == ',' ? p + 1 : NULL;
+}
+
 void host_pump(void)
 {
     process_events();
+    scripted_pad();
+    pad_update();
     scripted_keys();
 
     bool worked = false;
@@ -445,6 +506,11 @@ static void key_event(SDL_Scancode sc, bool down)
         if (down) feed(make, sizeof make); else feed(brk, sizeof brk);
         return;
     }
+    /* OG: F8 switches between the chase view and the cockpit while racing */
+    if (sc == SDL_SCANCODE_F8 && enh_keys_racing()) {
+        if (down) enh_chase_toggle();
+        return;
+    }
     u16 x = xt_scan(sc);
     if (!x) return;
     u16 mapped[16];
@@ -503,7 +569,10 @@ static void process_events(void)
             repaint = true;
             break;
         case SDL_EVENT_GAMEPAD_ADDED:
-            if (!gamepad) gamepad = SDL_OpenGamepad(ev.gdevice.which);
+            /* OG: TD3_NO_PADS=1 leaves the real pads alone (test runs while someone plays; TD3_PAD's virtual one
+             * is still taken) */
+            if (!gamepad && (!SDL_getenv("TD3_NO_PADS") || SDL_IsJoystickVirtual(ev.gdevice.which)))
+                gamepad = SDL_OpenGamepad(ev.gdevice.which);
             break;
         case SDL_EVENT_GAMEPAD_REMOVED:
             if (gamepad && SDL_GetGamepadID(gamepad) == ev.gdevice.which) {
@@ -557,6 +626,141 @@ bool host_joy_read(s16 *x, s16 *y, u8 *buttons)
     if (buttons) *buttons = b;
     return true;
 }
+
+/* ---------------------------------------------------------------- OG: gamepad controls */
+
+/* The pad presses the keys the game knows (fed as the keyboard would send them, past the key bindings, as
+ * the actions' own keys). Racing: right trigger Up (gas), left trigger Down (brake), A Space (handbrake), held;
+ * B / RB gear up (A key), X / LB gear down (Z), Y chase view / cockpit, Start pause (Ctrl+P), Back Esc,
+ * d-pad up H (lights), down W (wipers), left M (radio), right R (mirror), left stick click F6 (back to the
+ * road), right stick click F10 (replay); left stick steering (host_pad_steer), right stick looking round (chase
+ * view; pulled back: behind). A message box: A Y, B N, Start Enter, Back Esc. Menus: d-pad / left stick the
+ * cursor keys (repeating), A / Start Enter, B / Back Esc. */
+enum { PAD_NONE = -1, PAD_RACE, PAD_MSG, PAD_MENU };
+#define PAD_MAXHELD 8
+static u16 pad_held[PAD_MAXHELD];
+static int pad_nheld;
+static bool pad_prev[SDL_GAMEPAD_BUTTON_COUNT];
+static int pad_ctx = PAD_NONE;
+static bool pad_steer_on;
+static int pad_rep_key;
+static Uint64 pad_rep_at;
+
+static void pad_key(u16 key, bool down)
+{
+    u8 seq[2];
+    int n = 0;
+    if (key & GREY) seq[n++] = 0xE0;
+    seq[n++] = (u8)((key & 0x7F) | (down ? 0 : 0x80));
+    feed(seq, n);
+}
+static void pad_tap(u16 key) { pad_key(key, true); pad_key(key, false); }
+static void pad_tap_ctrl(u16 key) { pad_key(0x1D, true); pad_tap(key); pad_key(0x1D, false); }
+
+/* the keys held for the pad become exactly want[0..n) */
+static void pad_hold(const u16 *want, int n)
+{
+    for (int i = 0; i < pad_nheld; ) {
+        bool keep = false;
+        for (int j = 0; j < n; j++) if (want[j] == pad_held[i]) keep = true;
+        if (keep) { i++; continue; }
+        pad_key(pad_held[i], false);
+        pad_held[i] = pad_held[--pad_nheld];
+    }
+    for (int j = 0; j < n; j++) {
+        bool has = false;
+        for (int i = 0; i < pad_nheld; i++) if (pad_held[i] == want[j]) has = true;
+        if (!has && pad_nheld < PAD_MAXHELD) { pad_key(want[j], true); pad_held[pad_nheld++] = want[j]; }
+    }
+}
+
+static double pad_axis(SDL_GamepadAxis a) { return SDL_GetGamepadAxis(gamepad, a) / 32767.0; }
+
+static void pad_update(void)
+{
+    if (!kbd_handler) return;
+    if (!gamepad) {
+        if (pad_nheld) pad_hold(NULL, 0);
+        pad_ctx = PAD_NONE;
+        return;
+    }
+    int ctx = enh_keys_suspended() ? PAD_MSG : enh_keys_racing() ? PAD_RACE : PAD_MENU;
+    bool b[SDL_GAMEPAD_BUTTON_COUNT];
+    for (int i = 0; i < SDL_GAMEPAD_BUTTON_COUNT; i++) b[i] = SDL_GetGamepadButton(gamepad, (SDL_GamepadButton)i);
+    if (ctx != pad_ctx) {                         /* a new context: nothing held over, no edges from before */
+        pad_hold(NULL, 0);
+        memcpy(pad_prev, b, sizeof pad_prev);
+        pad_ctx = ctx;
+        pad_rep_key = 0;
+        enh_chase_look(0);
+    }
+#define EDGE(btn) (b[SDL_GAMEPAD_BUTTON_##btn] && !pad_prev[SDL_GAMEPAD_BUTTON_##btn])
+    if (ctx == PAD_RACE) {
+        u16 want[4];
+        int n = 0;
+        if (pad_axis(SDL_GAMEPAD_AXIS_RIGHT_TRIGGER) > 0.25) want[n++] = GREY | 0x48;
+        if (pad_axis(SDL_GAMEPAD_AXIS_LEFT_TRIGGER) > 0.25) want[n++] = GREY | 0x50;
+        if (b[SDL_GAMEPAD_BUTTON_SOUTH]) want[n++] = 0x39;
+        pad_hold(want, n);
+        if (EDGE(EAST) || EDGE(RIGHT_SHOULDER)) pad_tap(0x1E);
+        if (EDGE(WEST) || EDGE(LEFT_SHOULDER)) pad_tap(0x2C);
+        if (EDGE(NORTH)) enh_chase_toggle();
+        if (EDGE(START)) pad_tap_ctrl(0x19);
+        if (EDGE(BACK)) pad_tap(0x01);
+        if (EDGE(DPAD_UP)) pad_tap(0x23);
+        if (EDGE(DPAD_DOWN)) pad_tap(0x11);
+        if (EDGE(DPAD_LEFT)) pad_tap(0x32);
+        if (EDGE(DPAD_RIGHT)) pad_tap(0x13);
+        if (EDGE(LEFT_STICK)) pad_tap(0x40);
+        if (EDGE(RIGHT_STICK)) pad_tap(0x44);
+        double rx = pad_axis(SDL_GAMEPAD_AXIS_RIGHTX), ry = pad_axis(SDL_GAMEPAD_AXIS_RIGHTY), look = 0;
+        if (fabs(rx) > 0.2) look = (rx < 0 ? -1 : 1) * (fabs(rx) - 0.2) / 0.8 * 0.5;   /* up to 90 degrees */
+        if (ry > 0.7) look = look < 0 ? -1.0 : 1.0;                                    /* behind */
+        enh_chase_look(look);
+    } else if (ctx == PAD_MSG) {
+        pad_hold(NULL, 0);
+        if (EDGE(SOUTH)) pad_tap(0x15);           /* Y */
+        if (EDGE(EAST)) pad_tap(0x31);            /* N */
+        if (EDGE(START)) pad_tap(0x1C);
+        if (EDGE(BACK)) pad_tap(0x01);
+    } else {
+        pad_hold(NULL, 0);
+        double lx = pad_axis(SDL_GAMEPAD_AXIS_LEFTX), ly = pad_axis(SDL_GAMEPAD_AXIS_LEFTY);
+        int key = 0;
+        if (b[SDL_GAMEPAD_BUTTON_DPAD_UP] || ly < -0.6) key = GREY | 0x48;
+        else if (b[SDL_GAMEPAD_BUTTON_DPAD_DOWN] || ly > 0.6) key = GREY | 0x50;
+        else if (b[SDL_GAMEPAD_BUTTON_DPAD_LEFT] || lx < -0.6) key = GREY | 0x4B;
+        else if (b[SDL_GAMEPAD_BUTTON_DPAD_RIGHT] || lx > 0.6) key = GREY | 0x4D;
+        Uint64 now = SDL_GetTicksNS();
+        if (key != pad_rep_key) {                 /* a new direction: at once, repeating after 0.4 s */
+            pad_rep_key = key;
+            if (key) { pad_tap((u16)key); pad_rep_at = now + 400 * SDL_NS_PER_MS; }
+        } else if (key && now >= pad_rep_at) {
+            pad_tap((u16)key);
+            pad_rep_at = now + 130 * SDL_NS_PER_MS;
+        }
+        if (EDGE(SOUTH) || EDGE(START)) pad_tap(0x1C);
+        if (EDGE(EAST) || EDGE(BACK)) pad_tap(0x01);
+    }
+#undef EDGE
+    memcpy(pad_prev, b, sizeof pad_prev);
+}
+
+bool host_pad_steer(double *pos)
+{
+    if (!gamepad || pad_ctx != PAD_RACE) return false;
+    double x = pad_axis(SDL_GAMEPAD_AXIS_LEFTX), a = fabs(x);
+    const double DZ = 0.10;
+    if (a > DZ) pad_steer_on = true;
+    if (!pad_steer_on) return false;
+    a = a <= DZ ? 0.0 : (a - DZ) / (1.0 - DZ);
+    if (a > 1.0) a = 1.0;
+    a = pow(a, 1.6);                              /* fine near the centre */
+    *pos = x < 0 ? -a : a;
+    return true;
+}
+
+void host_pad_steer_off(void) { pad_steer_on = false; }
 
 /* ---------------------------------------------------------------- files, errors */
 

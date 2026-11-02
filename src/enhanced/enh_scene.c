@@ -21,6 +21,7 @@ static int K;                                    /* samples per view pixel */
 static double W32;                               /* view width * 32 (DS:BA95 + 20h) */
 static double CX32;                              /* view centre, 1/32 px (DS:BA97) */
 static double VROWS;                             /* view rows */
+static double CXA;                               /* OG: the view centre in bearing units (BA99 << 8; the chase view's 1400h) */
 
 static int NV;                                   /* vertices: the game's, then the far ring's */
 static double sx[ENH_MAX_ALL_VERTS];             /* bearing on screen, [0, 65536) (sx[] of 394c) */
@@ -54,7 +55,7 @@ static inline double elev(double dy, double dist) { return atan2(dy, dist < 1e-3
 
 static void project(void)
 {
-    double base = (double)(S->cx_hi << 8) - V->heading;
+    double base = CXA - V->heading;
     for (int v = 0; v < NV; v++) {
         double dx = wraps(V->vx[v] - V->cam_x4), dz = wraps(V->vz[v] - V->cam_z4);
         double d = sqrt(dx * dx + dz * dz);
@@ -418,7 +419,7 @@ static void draw_point(int v0, u16 w0)
     if (owner < 0) return;
     double a = floor(V->obj_heading[owner] / 256.0) * 256.0;
     if (!(w0 & 0x2000)) a += 0x4000;                         /* bit 13 clear: the lamp faces sideways */
-    a = a - V->heading - x + (double)((front ? S->cx_hi : 0x14) << 8);
+    a = a - V->heading - x + (front ? CXA : (double)(0x14 << 8));
     a = fmod(wrapu(a), 32768.0);
     if (a > 16384.0) a = 32768.0 - a;
     double s = sin(a / 16384.0 * M_PI / 2);                  /* 0 edge-on, 1 face-on */
@@ -682,6 +683,34 @@ static void sky_ground(void)
     poly(4, sxs, gnd, ENH_PAIR(S->ground_pair), false);
 }
 
+/* OG: the chase view's headlight beams: lights on the ground in front of the car, before the car is drawn (the
+ * car then is not lit by them) */
+static void chase_beam(void)
+{
+    if (V->beam_n != 6) return;
+    T = &enh_front;
+    double px[6], py[6];
+    for (int k = 0; k < 6; k++) {
+        double dx = wraps(V->beam_vx[k] - V->cam_x4), dz = wraps(V->beam_vz[k] - V->cam_z4);
+        double d = sqrt(dx * dx + dz * dz);
+        px[k] = wrapu(atan2(dx, dz) * RAD2A + CXA - V->heading);
+        py[k] = V->cam_row - elev(V->beam_vy[k] - V->cam_y, d);
+    }
+    unwrap(6, px, W32 / 2);
+    bool zt = z_far_test;
+    u8 zm = z_mode;
+    z_far_test = false;
+    z_mode = Z_NONE;
+    for (int q = 0; q < 2; q++) {
+        double x[8], y[8];
+        for (int k = 0; k < 4; k++) { x[k] = px[2 * q + k]; y[k] = py[2 * q + k]; }
+        int n = hull(4, x, y);
+        if (n >= 3) poly(n, x, y, ENH_PAIR(0x0808), true);
+    }
+    z_far_test = zt;
+    z_mode = zm;
+}
+
 static void overlays(void)
 {
     T = &enh_front;
@@ -707,16 +736,17 @@ void enh_scene_build(const EnhSnap *s, const EnhView *v)
     S = s;
     V = v;
     K = enh_scale * enh_aa;
-    W32 = (double)s->w32m + 0x20;
+    W32 = s->chase ? ENH_CHASE_W * 32.0 : (double)s->w32m + 0x20;   /* OG: the chase view covers the screen */
     CX32 = W32 / 2;
-    VROWS = s->rows;
-    enh_target_reset(&enh_front, (int)(W32 / 32), s->rows, K);
+    VROWS = s->chase ? ENH_CHASE_ROWS : s->rows;
+    CXA = s->chase ? CX32 : (double)(s->cx_hi << 8);
+    enh_target_reset(&enh_front, (int)(W32 / 32), (int)VROWS, K);
     enh_target_reset(&enh_mirror, 88, 19, K);
     enh_front.light_max = enh_mirror.light_max = (u8)((s->day ? enh_beam_day : enh_beam_night) * 255 / 100);
     enh_front.light_soft = enh_mirror.light_soft = enh_beam_soft;
 
     /* how the samples map back to lines of sight, for the depth (enh_raster.c) */
-    EnhMap m = { false, (double)(s->cx_hi << 8) - v->heading, v->cam_row, v->roll_slope, CX32,
+    EnhMap m = { false, CXA - v->heading, v->cam_row, v->roll_slope, CX32,
                  s->mirror_base, v->pitch, v->mroll_slope };
     enh_front.map = m;
     m.mirror = true;
@@ -731,7 +761,7 @@ void enh_scene_build(const EnhSnap *s, const EnhView *v)
     for (int f = 0; f < s->nf; f++) { fkey[f] = face_key(f); forder[f] = s->order[s->nf - 1 - f]; }
 
     int ns = 0;
-    double base = (double)(s->cx_hi << 8) - v->heading;
+    double base = CXA - v->heading;
     for (int k = 0; k < s->nspr; k++) {
         const EnhSpr *e = &s->spr[k];
         if ((u8)e->id == 0) continue;
@@ -762,7 +792,12 @@ void enh_scene_build(const EnhSnap *s, const EnhView *v)
     }
     z_far_write = false;
     z_far_test = s->nff > 0;
-    for (int fi = 0; fi < s->nf; fi++) draw_face(forder[fi]);
+    int car_from = s->nf - s->car_nf;                         /* OG: the chase view's car is drawn last */
+    for (int fi = 0; fi < s->nf; fi++) {
+        if (fi == car_from) chase_beam();
+        draw_face(forder[fi]);
+    }
+    if (car_from == s->nf) chase_beam();
     z_far_test = false;
     for (int k = 0; k < ns; k++) if (!sky_sprite(&sprs[k])) draw_sprite(&sprs[k]);
     z_mode = Z_NONE;                                         /* the cockpit overlays */

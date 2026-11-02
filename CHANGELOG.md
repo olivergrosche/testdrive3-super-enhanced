@@ -1,5 +1,15 @@
 # Changelog
 
+## 0.2.0-og1 (fork)
+
+- Chase view: drive with the camera behind the car, over the whole screen. The game runs its cockpit view
+  underneath, so physics and collisions are unchanged. The car is added to the enhanced view. The dials and the
+  gear lever's window move to the corners, and the headlight beams light the road ahead. F8 or the pad's Y
+  switches to the cockpit (`CHASE.md`).
+- Gamepad: triggers for gas and brake, analog steering on the left stick, buttons for shifting, handbrake, lights,
+  pause and the camera, the right stick to look around. The pad also works in the menus and message boxes.
+- Builds with a static SDL3 (no SDL3.dll to copy).
+
 ## 0.2.0
 
 - Distance fog per pixel: the scenery sinks gradually into the fog instead of face by face; stronger by default (70 %).
