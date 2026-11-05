@@ -11,6 +11,8 @@
 #include <math.h>
 #include <stdlib.h>
 
+#include <SDL3/SDL.h>
+
 #define TURN   65536.0                           /* angle units per turn (u16 headings, 1/32 px) */
 #define RAD2A  (TURN / (2.0 * M_PI))             /* radians -> angle units */
 #define RAD2PX (1024.0 / M_PI)                   /* radians -> pixels (256 px = 45 degrees) */
@@ -26,6 +28,11 @@ static double CXA;                               /* OG: the view centre in beari
  * (sx[]) stay the original's; the front target's x = sx + SHIFT (1/32 px), W32 = the whole target. */
 static double SHIFT;
 int enh_wide_cols;
+
+/* OG: on foot the front target shows the projection smaller by ZOOM (a wider view): the scene is built for a
+ * window 1 / ZOOM as large and its coordinates scaled down by ZOOM into the target (poly, the sprites, the sky) */
+static double ZOOM = 1.0;
+double enh_scene_zoom(void) { return ZOOM; }
 
 static int NV;                                   /* vertices: the game's, then the far ring's */
 static double sx[ENH_MAX_ALL_VERTS];             /* bearing on screen, [0, 65536) (sx[] of 394c) */
@@ -72,6 +79,21 @@ static void project(void)
 }
 
 static double depth(int v) { return fabs(V->vy[v] - V->cam_y) + vdist[v]; }
+
+/* OG (WEAPON.md): a world point in the front view last built, as project() and the target place it */
+bool enh_front_point(double x4, double y, double z4, double *tx, double *ty, double *dist)
+{
+    if (!V) return false;
+    double dx = wraps(x4 - V->cam_x4), dz = wraps(z4 - V->cam_z4), dy = y - V->cam_y;
+    double d = sqrt(dx * dx + dz * dz);
+    double rel = wraps(atan2(dx, dz) * RAD2A - V->heading + CXA - CX32);   /* from the view's centre */
+    if (fabs(rel) > 0.45 * TURN) return false;
+    double e = elev(dy, d);
+    *tx = (CX32 + rel + SHIFT) / 32.0 * ZOOM;
+    *ty = (V->cam_row - e + V->roll_slope * rel) * ZOOM;
+    *dist = sqrt(d * d + dy * dy);
+    return true;
+}
 
 /* ENH: the height of the game's ground under the point (x4, z4): the highest plane, at that point, of the
  * snapshot's triangles and quads that contain it (seen from above), not steeper than 1.5 and not more than
@@ -177,9 +199,10 @@ static void poly(int n, const double *x32, const double *y, u32 value, bool or_m
     p->zc = z_const;
     p->zfar_write = z_far_write;
     p->zfar_test = z_far_test;
+    double z = T == &enh_front ? ZOOM : 1.0;                 /* OG */
     for (int i = 0; i < n; i++) {
-        p->x[i] = (float)(x32[i] / 32.0 * K);
-        p->y[i] = (float)(y[i] * K);
+        p->x[i] = (float)(x32[i] / 32.0 * K * z);
+        p->y[i] = (float)(y[i] * K * z);
     }
 }
 
@@ -618,8 +641,8 @@ static void draw_sprite(const SprItem *it)
         double top = row + 1 + V->roll_slope * wraps(ang - CX32) - h + V->cam_row;
         p = enh_prim_add(&enh_front, P_SPRITE);
         if (!p) return;
-        p->sx0 = (float)((x - w / 2) * K); p->sx1 = (float)((x + w / 2) * K);
-        p->sy0 = (float)(top * K);         p->sy1 = (float)((top + h) * K);
+        p->sx0 = (float)((x - w / 2) * K * ZOOM); p->sx1 = (float)((x + w / 2) * K * ZOOM);   /* OG: ZOOM */
+        p->sy0 = (float)(top * K * ZOOM);         p->sy1 = (float)((top + h) * K * ZOOM);
     } else {
         double x = 0x58 - wraps(ang - S->mirror_base) / 64.0;
         double rt = V->mroll_slope * wraps(ang - 0x9400);
@@ -673,8 +696,9 @@ static void sky_ground(void)
         p->value = ENH_PAIR(S->sky_pair);
         p->gradient = S->gradient;
         p->sky_base = S->sky_base;
-        p->hy0 = (float)(yl * K);
+        p->hy0 = (float)(yl * K * ZOOM);                     /* OG: ZOOM */
         p->hslope = (float)((yr - yl) / wpx);
+        p->unzoom = (float)(1.0 / ZOOM);
         p->ground = ENH_PAIR(S->ground_pair);                /* the ground below the horizon */
         p->ground_haze = haze_max > 0 ? ground_haze : NULL;
     }
@@ -765,15 +789,22 @@ void enh_scene_build(const EnhSnap *s, const EnhView *v)
     SHIFT = enh_wide_cols * 32.0;                            /* OG widescreen: the extra columns */
     W32 += 2 * SHIFT;
     enh_target_reset(&enh_front, (int)(W32 / 32), (int)VROWS, K);
+    /* OG: on foot the scene is built for a window 1 / ZOOM as large (then drawn into the target at ZOOM) */
+    ZOOM = s->foot ? enh_foot_zoom() : 1.0;
+    if (ZOOM != 1.0) {
+        W32 /= ZOOM; CX32 /= ZOOM; VROWS /= ZOOM; SHIFT /= ZOOM;
+        CXA = CX32;
+    }
     enh_target_reset(&enh_mirror, 88, 19, K);
     enh_front.light_max = enh_mirror.light_max = (u8)((s->day ? enh_beam_day : enh_beam_night) * 255 / 100);
     enh_front.light_soft = enh_mirror.light_soft = enh_beam_soft;
 
     /* how the samples map back to lines of sight, for the depth (enh_raster.c) */
     EnhMap m = { false, CXA - v->heading + SHIFT, v->cam_row, v->roll_slope, CX32 + SHIFT,
-                 s->mirror_base, v->pitch, v->mroll_slope };
+                 s->mirror_base, v->pitch, v->mroll_slope, ZOOM };
     enh_front.map = m;
     m.mirror = true;
+    m.zoom = 1.0;
     enh_mirror.map = m;
 
     NV = s->nv + s->nfv;

@@ -1,3 +1,23 @@
+# Test Drive III Super Enhanced
+
+A fork of [kylofon/testdrive3-enhanced](https://github.com/kylofon/testdrive3-enhanced) (Test Drive III Enhanced,
+the SDL3 port by Krzysztof Kania) that turns the 1990 racer into a small open-world action game. On top of
+everything upstream does:
+
+* Chase view, modern gamepad controls, widescreen (`CHASE.md`).
+* On foot: stop, get out, walk, run and jump in the first person, get back in (`FOOT.md`).
+* Weapons: a pistol, uzis and shotguns, aiming down the sights; cars shot into burning wrecks (`WEAPON.md`).
+* Reversing with the automatic gearbox (`REVERSE.md`).
+* Ambushes: gunmen waiting on the road, who drop their guns (`FOES.md`).
+* Civilians walking along the roads and round the buildings (`CIVS.md`).
+* Wanted levels: police chases, arrests, searches on foot, hiding; car thieves (`POLICE.md`).
+
+Everything the fork adds is marked `OG:` in the code; `CHANGELOG.md` lists it by version (`-og1` .. `-og7`). It
+needs the original game (version 3.0) as upstream does; the game files are not included. The port, its faithful
+engine and the enhanced renderer are upstream's work. MIT, see `LICENSE`.
+
+---
+
 # Test Drive III Enhanced — SDL3
 
 An enhanced native port of Accolade's *Test Drive III: The Passion* (1990). Not an emulator. The original game
@@ -95,6 +115,19 @@ cmake --build build
 * Gamepad: RT gas, LT brake, left stick steering, A handbrake, B / RB shift up, X / LB shift down,
   Y chase view / cockpit, right stick look around (pull back: behind), Start pause, Back leave,
   d-pad lights / wipers / radio / mirror, L3 back to road, R3 replay. Menus: d-pad, A, B (`CHASE.md`).
+* Police (fork og7, `POLICE.md`): crimes bring one to three stars; the police chase, get out, arrest or shoot,
+  and search on foot; hide out of sight long enough to lose them. A car left alone may be stolen.
+* Civilians (fork og6, `CIVS.md`): people walk along the roads and round the buildings, run from gunfire and
+  jump out of the way of the car.
+* Ambushes (fork og4, `FOES.md`): now and then gunmen wait on the road ahead and shoot; fight them on foot or
+  drive through. Health bottom left (on foot) or top left (in the car); a cleared ambush gives a life.
+* Reversing (automatic gearbox, fork og3, `REVERSE.md`): keep the brake held at a standstill (Down / LT), the
+  brake key then drives backwards; the gas puts 1st in again.
+* On foot (fork og2, `FOOT.md`): stop, then hold Y or press E to get out; walk with the left stick (W A S D),
+  look with the right stick (arrows, Page Up / Down), run L3 / LB (Shift), jump A (Space); Y or E next to the car
+  gets back in.
+* Weapons on foot (fork og3, og5, `WEAPON.md`): fire RT (left mouse, F), aim LT (right mouse), reload X (R),
+  change RB / d-pad (Q, wheel, 1 2 3); the pistol, and the uzis and shotguns dropped by the gunmen.
 
 ## Layout
 

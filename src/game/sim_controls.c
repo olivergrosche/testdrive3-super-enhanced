@@ -15,6 +15,29 @@ static void gear_up(void);
 static void gear_down(void);
 static void gear_up_gate(void);
 static void gear_down_gate(void);
+static void key_none(void);
+static void key_mouse_toggle(void);
+static void key_wheel_centring(void);
+static void key_knob_toggle(void);
+static void key_chase_view(void);
+static void key_wipers(void);
+static void key_window_size(void);
+static void key_instant_replay(void);
+static void key_return_to_road(void);
+static void key_replay_pause(void);
+static void key_steer_sensitivity(void);
+static void key_mirror(void);
+
+/* OG: on foot (FOOT.md) the keys of the driving, the cockpit and the replays do nothing (the walking keys W A S D
+ * are gear up, wipers and the dial knob in the car); lights, radio, detail, pause and the like still work */
+static bool foot_blocks(CodeFn fn)
+{
+    if (!foot_active()) return false;
+    return fn == key_none || fn == gear_up_gate || fn == gear_down_gate || fn == key_mouse_toggle ||
+           fn == key_wheel_centring || fn == key_knob_toggle || fn == key_chase_view || fn == key_wipers ||
+           fn == key_window_size || fn == key_instant_replay || fn == key_return_to_road ||
+           fn == key_replay_pause || fn == key_steer_sensitivity || fn == key_mirror;
+}
 
 /* ---- far entry points ---- */
 
@@ -34,14 +57,17 @@ void key_dispatch(void)
     DSB(DS_key_code) = 0;
     if (k >= 0x40 && k < 0x80) {
         u16 off = SEGW(0x0E12, 0x0000 + 2 * (k - 0x40));         /* table CS:0000 */
+        if (foot_blocks(codeptr_lookup_near(0x0E12, off))) return;   /* OG */
         codeptr_lookup_near(0x0E12, off)();
         return;
     }
     if (k >= 0x81 && k <= 0x8A && DSW(DS_race_state) < 2) {
         u16 off = DSW(DS_key_ext_handlers + 2 * (k - 0x81));     /* DS:B6EF */
+        if (foot_blocks(codeptr_lookup_near(0x0E12, off))) return;   /* OG */
         codeptr_lookup_near(0x0E12, off)();
         return;
     }
+    if (foot_active()) return;                                  /* OG: no pedals or wheel on foot */
     controls_poll();                                            /* 0, < 40h, 80h, > 8Ah, or F-keys in race_state >= 2 */
 }
 
@@ -371,7 +397,8 @@ void auto_shift(void)
     if (rpm >= DSW(0x120C)) return;
     if (bl == 1) return;
     if (bl < 1) {                                             /* R -> N when coasting (automatic only) */
-        if (DSB(DS_auto_gearbox)) gear_up();
+        /* OG (REVERSE.md): not while the car still rolls backwards, so the brake key takes up reversing again */
+        if (DSB(DS_auto_gearbox) && !(DSSL(DS_speed_long) < 0 && DSW(DS_car_speed) != 0)) gear_up();
         return;
     }
     if (DSB(DS_auto_gearbox) == 0) {
@@ -389,6 +416,45 @@ void auto_shift(void)
 
 /* ---- held controls (simulation.md §4.4) ---- */
 
+/* OG: reversing with the automatic gearbox (REVERSE.md), as in modern driving games. The original reverses only
+ * through the gear keys (Z / the pad's X or LB down to R, then gas), and its automatic shifts R to N as soon as the
+ * gas is let go. Here, with the automatic: holding the brake (Down, the pad's LT, the left mouse button) at a
+ * standstill for REV_HOLD_S puts R in; in R the brake key is the gas, and the gas key puts 1st in at once (its
+ * drive brakes the rolling back, then takes the car forward). CL = the held-control bits (1 Up, 2 Down);
+ * returns them as the original's controls should see them. Not with Enter held (Enter+Up / Down shifts). */
+#define REV_HOLD_S 0.30
+static u8 auto_reverse(u8 cl)
+{
+    static u64 down_since;
+    if (DSB(DS_auto_gearbox) == 0 || (cl & 0x10) || DSB(DS_crashed) != 0) { down_since = 0; return cl; }
+    bool up = cl & 1, down = (cl & 2) != 0, still = DSW(DS_car_speed) == 0;
+    if (DSB(DS_gear) == 0) {                                      /* in R: the brake key is the gas */
+        down_since = 0;
+        if (up && !down) {
+            /* the gas: 1st at once; the drive then works against the rolling back (the brakes alone hardly hold
+             * the engine's pull in R) and, stopped, takes the car forward */
+            DSB(DS_gear) = 2;
+            DSB(DS_throttle) = 0;
+            gear_lever_target();
+            return cl;
+        }
+        return (u8)((cl & ~3) | (down ? 1 : 0));
+    }
+    if (down && !up && still && DSB(DS_on_ground) != 0) {
+        u64 now = host_time_ns();
+        if (!down_since) down_since = now;
+        if (now - down_since >= (u64)(REV_HOLD_S * 1e9)) {
+            down_since = 0;
+            DSB(DS_gear) = 0;                                     /* R in */
+            DSB(DS_throttle) = 0;
+            DSB(DS_clock_running) = 1;
+            gear_lever_target();
+            return (u8)((cl & ~3) | 1);                           /* the held brake is the gas now */
+        }
+    } else down_since = 0;
+    return cl;
+}
+
 /* 0e12:0751 controls_poll — simulation.md §4.4 */
 static void controls_poll(void)
 {
@@ -403,6 +469,7 @@ static void controls_poll(void)
     cl |= ch;
     cl &= 0x3F;
     if (DSB(DS_mouse_on) && DSB(DS_ext_view) == 0) cl = mouse_controls(cl);
+    if (DSB(DS_ext_view) == 0) cl = auto_reverse(cl);         /* OG: brake at a standstill = reverse */
     if (DSB(DS_ext_view) == 0) {
         ch = DSB(DS_prev_bits);
         DSB(DS_prev_bits) = cl;

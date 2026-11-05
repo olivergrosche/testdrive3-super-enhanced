@@ -214,7 +214,7 @@ void scene_prepare(void)
     crossing_gate_update();                               /* 5e70 */
     vertices_project();
     faces_sort_keys();
-    if (DSB(DS_ext_view) == 0) near_face_hits();          /* 34f1 */
+    if (DSB(DS_ext_view) == 0 && !foot_active()) near_face_hits();   /* 34f1; OG: not the walker's (foot.c) */
     sky_ground_draw();
     obj_runtime_colours_all();
     police_update();                                      /* 5ffe */
@@ -400,8 +400,12 @@ void frame_update(void)
     if (DSB(DS_menu_preview) == 0) race_clock_hud();      /* 0b1d */
     DSB(0x9484)++;
     if (DSB(DS_frozen) == 0) {
-        if (DSB(DS_ext_view) == 0) car_physics();         /* 0977:0008 */
-        replay_update();                                  /* 0ab4:1220 */
+        foot_frame_begin();                               /* OG: getting out or in (FOOT.md) */
+        if (foot_active()) foot_physics();                /* OG: the walker instead of the car, no replay */
+        else {
+            if (DSB(DS_ext_view) == 0) car_physics();     /* 0977:0008 */
+            replay_update();                              /* 0ab4:1220 */
+        }
     }
     camera_pos_update();                                  /* 6e92 */
     /* 7733: camera select */
@@ -463,6 +467,7 @@ void frame_draw(void)
                 DSB(DS_crash_flag) = 0;
             }
         }
+        if (foot_active()) foot_after_draw();             /* OG: the walker neither crashes nor bounces */
         if (DSB(DS_crash_flag) != 0 && DSB(DS_ext_view) == 0) {
             DSB(DS_crash_water) = 0;
             if (DSB(DS_surface_under_car) == 0x0E) { DSB(DS_crash_water) = 1; DSB(DS_water_anim) = 1; }

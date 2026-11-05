@@ -78,6 +78,29 @@ bool host_joy_read(s16 *x, s16 *y, u8 *buttons);
 bool host_pad_steer(double *pos);
 void host_pad_steer_off(void);
 
+/* ---- OG: on foot (game/foot.c, FOOT.md). In the car, holding the pad's Y (a short press still switches the chase
+ * view) or pressing E asks to get out; on foot, Y or E asks to get in. host_foot_request returns (and clears) that
+ * request. host_set_foot switches the pad from driving to walking. host_foot_input: the walking controls now. */
+typedef struct {
+    double move_x, move_y;      /* sideways (+ right), forward (+), -1 .. 1 */
+    double turn, look;          /* turning (+ right), looking up (+), -1 .. 1 */
+    bool run, jump;
+    bool fire, aim, reload;     /* OG (WEAPON.md): pad RT / LT / X, mouse left / right, keys F / R */
+} HostFootInput;
+bool host_foot_request(void);
+void host_set_foot(bool on);
+void host_foot_input(HostFootInput *in);
+/* OG: the mouse's motion since the last call, window pixels (on foot the mouse looks) */
+void host_foot_mouse(double *dx, double *dy);
+/* OG (WEAPON.md): the weapon asked for since the last call: *select 1..3 (keys 1 2 3; 0 none), *cycle steps
+ * (pad RB / d-pad right +1, d-pad left -1, key Q +1, the mouse wheel) */
+void host_foot_weapon(int *select, int *cycle);
+
+/* ---- OG: sampled sounds (WEAPON.md): mono 16-bit at HOST_AUDIO_RATE, mixed over the OPL2 and the speaker. The
+ * samples must stay valid while they play. vol: 0 .. 1; pan: -1 (left) .. 1 (right). */
+#define HOST_AUDIO_RATE 44100
+void host_pcm_play(const s16 *samples, int n, double vol, double pan);
+
 /* ---- Audio. The sound driver writes OPL2 registers and the PC speaker as the original does; writes
  * take effect from the current tick onward (sound.md, port design). */
 void host_opl_write(u8 reg, u8 value);

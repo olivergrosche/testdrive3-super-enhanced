@@ -1,5 +1,51 @@
 # Changelog
 
+## 0.2.0-og7 (fork)
+
+- Wanted levels: crimes someone sees (shooting near the police, hurting civilians, wrecking cars, attacking the
+  police) bring one to three stars. Police cars chase with the original's pursuit (traffic out of sight joins as
+  police when there are too few); caught up, officers get out to arrest (one star: "BUSTED!" costs a life) or to
+  shoot. Out of their sight they search on foot where they last saw the player; long enough out of sight, they lose
+  the player. The police cars keep to the roads, so hiding off the road works.
+- Car thieves: a car left alone too long is driven off by a civilian and left further down the road; a chevron
+  shows the way to it (`POLICE.md`).
+
+## 0.2.0-og6 (fork)
+
+- Civilians: up to six people (at most two of them along the roads) walk along the road edges and stroll round the buildings, each dressed differently
+  (shirts, trousers or dresses, caps, hair, skin tones, heights). They jump out of the way of a fast car and run
+  from gunfire and ambushes with their hands on their heads (`CIVS.md`).
+
+## 0.2.0-og5 (fork)
+
+- Two more weapons: an uzi (automatic, 32 rounds) and a pump shotgun (8 shells, nine pellets, loaded shell by shell),
+  each with its own model, recoil, sound and sights. The gunmen carry pistols, uzis or shotguns and fire them their
+  own way; dead, they drop them with rounds to pick up. Rounds are scarce now: the pistol starts with 12 + 24, and
+  dying loses everything else. RB / the d-pad (Q, the mouse wheel, 1 2 3) change the weapon (`WEAPON.md`).
+
+## 0.2.0-og4 (fork)
+
+- Ambushes: now and then a car ahead stops across the road and three gunmen wait round it (or on the road). They
+  spot the player, fire bursts, step aside, flinch, fall; three body hits or one head hit drop them, and the car
+  runs them over. The player has health (red flashes and a chevron show where shots came from, it comes back after
+  a while); at nothing a life is lost. A cleared ambush gives a life (`FOES.md`).
+
+## 0.2.0-og3 (fork)
+
+- A pistol on foot, shown in the first person: 12 rounds, reloading, aiming down the sights, recoil, muzzle flash.
+  Shots hit what the view shows: sparks on metal, dust, grit, splashes. Five hits stop a vehicle, which burns out,
+  smokes and stays where it is (also seen from the car). Synthesised shot, hit and reload sounds. On foot the mouse
+  looks around (`WEAPON.md`).
+- Reversing with the automatic gearbox: keep the brake held at a standstill and the car drives backwards; the gas
+  takes it forward again (`REVERSE.md`).
+
+## 0.2.0-og2 (fork)
+
+- On foot: stop the car, hold the pad's Y (or press E) to get out, walk, run and jump in the first person, and
+  get back in with Y / E next to the car. The parked car stays in the world as a solid vehicle that traffic stops
+  for; walls, vehicles, trees and rocks block the walker, water is not walked into. The view covers the screen
+  with a wider field of view and turns at the display rate (`FOOT.md`).
+
 ## 0.2.0-og1 (fork)
 
 - Chase view: drive with the camera behind the car, over the whole screen. The game runs its cockpit view

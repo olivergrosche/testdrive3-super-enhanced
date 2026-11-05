@@ -42,6 +42,7 @@ static void target_rays(EnhTarget *t)
     const double rad2a = 65536.0 / (2.0 * M_PI), rad2px = 1024.0 / M_PI;
     for (int c = 0; c < t->w; c++) {
         double x32 = (c + 0.5) * 32.0 / t->k, sx, e;
+        if (!m->mirror && m->zoom > 0) x32 /= m->zoom;              /* OG: the walker's wider view */
         if (!m->mirror) {
             sx = x32;
             e = m->roll_slope * (sx - m->cx32) / rad2px;
@@ -58,6 +59,7 @@ static void target_rays(EnhTarget *t)
     }
     for (int r = 0; r < t->h; r++) {
         double y = (r + 0.5) / t->k;
+        if (!m->mirror && m->zoom > 0) y /= m->zoom;                /* OG */
         double e = !m->mirror ? (m->cam_row - y) / rad2px : -((y - 10.0) * 2.0 + m->pitch) / rad2px;
         t->row_se[r] = (float)sin(e); t->row_ce[r] = (float)cos(e);
     }
@@ -91,6 +93,7 @@ EnhPrim *enh_prim_add(EnhTarget *t, EnhPrimKind kind)
     p->zmode = Z_NONE;
     p->ztest = false;
     p->zfar_write = p->zfar_test = false;
+    p->unzoom = 0;
     return p;
 }
 
@@ -291,6 +294,7 @@ static void raster_sky(const EnhTarget *t, const EnhPrim *p, int y0, int y1)
         if (t->use_lt) memset(t->lt + (size_t)r * t->w, 0, sizeof(u16) * (size_t)t->w);
         for (int c = 0; c < t->w; c++) {
             float d = (p->hy0 + p->hslope * ((float)c + 0.5f) - yc) / k;   /* rows above the horizon */
+            if (p->unzoom > 0) d *= p->unzoom;                              /* OG: projected rows */
             if (d <= 0.0f) {                                                /* the ground */
                 u32 h = 0;
                 if (p->ground_haze) {

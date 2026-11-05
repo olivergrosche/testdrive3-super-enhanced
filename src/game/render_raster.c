@@ -811,7 +811,7 @@ static void face_around_camera(u16 bx, u16 si, u16 di)
     u8 dl = (u8)(DSB(DS_face_type) >> 3);
     if (dl == 0) goto fill;
     if (dl < 0x0E) {
-        if (dl == 1) {                                    /* wall / rail */
+        if (dl == 1 && !foot_active()) {                  /* wall / rail; OG: not the walker's (foot.c) */
             u16 v = DSW(DS_car_speed);
             if (r3_neg(v)) v = (u16)-v;
             if (v < 0x14) bounce_back();

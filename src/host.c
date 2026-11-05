@@ -10,7 +10,7 @@
 #include "enhanced/enhanced.h"   /* ENH: key bindings */
 #include "opl3.h"
 
-#define AUDIO_RATE 44100
+#define AUDIO_RATE HOST_AUDIO_RATE
 #define SPEAKER_AMPLITUDE 5000
 
 static SDL_Window *window;
@@ -55,6 +55,15 @@ static int frame_ticks = HOST_DEFAULT_FRAME_TICKS;
 
 static void process_events(void);
 static void pad_update(void);   /* OG: gamepad controls */
+static bool foot_on, foot_req;  /* OG: on foot (FOOT.md): walking controls; a get-out / get-in request */
+static float foot_mdx, foot_mdy;  /* OG: mouse motion for looking on foot */
+static int foot_wsel, foot_wcycle;  /* OG: a weapon asked for (WEAPON.md) */
+static bool window_focus = true;
+static void foot_mouse_mode(void);
+
+/* OG: sampled sounds (WEAPON.md) */
+#define PCM_VOICES 12
+static struct { const s16 *s; int n, pos; int vl, vr; } pcm[PCM_VOICES];
 
 bool host_init(const char *dir, int window_scale, bool fullscreen)
 {
@@ -149,6 +158,19 @@ static void audio_for_one_tick(void)
     s16 buf[2 * 512];
     if (n > 512) n = 512;
     OPL3_GenerateStream(&opl, buf, (uint32_t)n);
+    for (int v = 0; v < PCM_VOICES; v++) {           /* OG: sampled sounds over the OPL2 */
+        if (!pcm[v].s) continue;
+        int m = pcm[v].n - pcm[v].pos;
+        if (m > n) m = n;
+        const s16 *s = pcm[v].s + pcm[v].pos;
+        for (int i = 0; i < m; i++) {
+            int l = buf[2 * i] + (s[i] * pcm[v].vl >> 8), r = buf[2 * i + 1] + (s[i] * pcm[v].vr >> 8);
+            buf[2 * i] = (s16)SDL_clamp(l, -32768, 32767);
+            buf[2 * i + 1] = (s16)SDL_clamp(r, -32768, 32767);
+        }
+        pcm[v].pos += m;
+        if (pcm[v].pos >= pcm[v].n) pcm[v].s = NULL;
+    }
     double freq = (double)PIT_HZ / (spk_div ? spk_div : 65536);
     double step = freq / AUDIO_RATE;
     for (int i = 0; i < n; i++) {
@@ -168,6 +190,22 @@ static void audio_for_one_tick(void)
 
 void host_opl_write(u8 reg, u8 value) { OPL3_WriteReg(&opl, reg, value); }
 
+void host_pcm_play(const s16 *samples, int n, double vol, double pan)
+{
+    if (!samples || n <= 0) return;
+    int v = 0, oldest = 0;
+    for (; v < PCM_VOICES && pcm[v].s; v++)
+        if (pcm[v].pos > pcm[oldest].pos) oldest = v;
+    if (v == PCM_VOICES) v = oldest;                 /* all busy: the one furthest on */
+    vol = SDL_clamp(vol, 0.0, 1.0);
+    pan = SDL_clamp(pan, -1.0, 1.0);
+    pcm[v].s = samples;
+    pcm[v].n = n;
+    pcm[v].pos = 0;
+    pcm[v].vl = (int)(256 * vol * (pan > 0 ? 1 - pan * 0.6 : 1));
+    pcm[v].vr = (int)(256 * vol * (pan < 0 ? 1 + pan * 0.6 : 1));
+}
+
 void host_speaker(u16 divisor, bool on)
 {
     spk_div = divisor;
@@ -181,10 +219,16 @@ static void snapshot(void)
     static bool checked;
     static Uint64 last_ns;
     static int n;
-    if (!checked) { dir = SDL_getenv("TD3_SNAPSHOT_DIR"); checked = true; }
+    static Uint64 every = 2 * SDL_NS_PER_SECOND;
+    if (!checked) {
+        dir = SDL_getenv("TD3_SNAPSHOT_DIR");
+        const char *ms = SDL_getenv("TD3_SNAPSHOT_MS");       /* OG developer aid: another interval */
+        if (ms && SDL_atoi(ms) > 0) every = (Uint64)SDL_atoi(ms) * SDL_NS_PER_MS;
+        checked = true;
+    }
     if (!dir) return;
     Uint64 now = SDL_GetTicksNS();
-    if (n && now - last_ns < 2 * SDL_NS_PER_SECOND) return;
+    if (n && now - last_ns < every) return;
     last_ns = now;
     SDL_Surface *s = SDL_CreateSurfaceFrom(frame_w, frame_h, SDL_PIXELFORMAT_XRGB8888, frame, frame_w * 4);
     if (!s) return;
@@ -528,6 +572,18 @@ static void key_event(SDL_Scancode sc, bool down)
         if (down) enh_chase_toggle();
         return;
     }
+    /* OG (WEAPON.md): on foot 1 2 3 choose the weapon, Q the next one */
+    if (foot_on && enh_keys_racing() && !(SDL_GetModState() & (SDL_KMOD_CTRL | SDL_KMOD_ALT)) &&
+        (sc == SDL_SCANCODE_1 || sc == SDL_SCANCODE_2 || sc == SDL_SCANCODE_3 || sc == SDL_SCANCODE_Q)) {
+        if (down && sc == SDL_SCANCODE_Q) foot_wcycle++;
+        else if (down) foot_wsel = sc == SDL_SCANCODE_1 ? 1 : sc == SDL_SCANCODE_2 ? 2 : 3;
+        return;
+    }
+    /* OG: E gets out of the car and back in (FOOT.md); Ctrl+E stays the engine sound */
+    if (sc == SDL_SCANCODE_E && enh_keys_racing() && !(SDL_GetModState() & (SDL_KMOD_CTRL | SDL_KMOD_ALT))) {
+        if (down) foot_req = true;
+        return;
+    }
     u16 x = xt_scan(sc);
     if (!x) return;
     u16 mapped[16];
@@ -571,13 +627,24 @@ static void process_events(void)
             break;
         case SDL_EVENT_WINDOW_FOCUS_LOST:
             if (focus_lost_handler) focus_lost_handler();
+            window_focus = false;                   /* OG: the mouse is let go */
+            foot_mouse_mode();
+            break;
+        case SDL_EVENT_WINDOW_FOCUS_GAINED:
+            window_focus = true;
+            foot_mouse_mode();
             break;
         case SDL_EVENT_MOUSE_MOTION:
             mouse_dx += ev.motion.xrel;             /* mickeys: window pixels, as the driver's default */
             mouse_dy += ev.motion.yrel;
+            foot_mdx += ev.motion.xrel;             /* OG */
+            foot_mdy += ev.motion.yrel;
             SDL_ConvertEventToRenderCoordinates(renderer, &ev);
             mouse_x = ev.motion.x;
             mouse_y = ev.motion.y;
+            break;
+        case SDL_EVENT_MOUSE_WHEEL:                     /* OG (WEAPON.md): on foot the wheel changes the weapon */
+            if (foot_on) foot_wcycle += ev.wheel.y > 0 ? -1 : ev.wheel.y < 0 ? 1 : 0;
             break;
         case SDL_EVENT_WINDOW_PIXEL_SIZE_CHANGED:     /* Alt+Enter, resizing, a static picture: redraw it */
         case SDL_EVENT_WINDOW_ENTER_FULLSCREEN:
@@ -662,6 +729,9 @@ static int pad_ctx = PAD_NONE;
 static bool pad_steer_on;
 static int pad_rep_key;
 static Uint64 pad_rep_at;
+#define FOOT_HOLD_MS 400
+static bool pad_y_wait, pad_y_fired, pad_run;   /* OG: Y let go since the last switch; the hold got out; running */
+static Uint64 pad_y_at;
 
 static void pad_key(u16 key, bool down)
 {
@@ -712,7 +782,26 @@ static void pad_update(void)
         enh_chase_look(0);
     }
 #define EDGE(btn) (b[SDL_GAMEPAD_BUTTON_##btn] && !pad_prev[SDL_GAMEPAD_BUTTON_##btn])
-    if (ctx == PAD_RACE) {
+    /* OG: Y in the car: a short press switches the view, held FOOT_HOLD_MS it gets out; on foot a press gets in.
+     * After a switch Y must be let go first. */
+    if (ctx != PAD_RACE) { pad_y_wait = true; pad_y_fired = false; }
+    if (!b[SDL_GAMEPAD_BUTTON_NORTH]) {
+        if (ctx == PAD_RACE && !foot_on && !pad_y_wait && !pad_y_fired && pad_prev[SDL_GAMEPAD_BUTTON_NORTH])
+            enh_chase_toggle();
+        pad_y_wait = pad_y_fired = false;
+    } else if (EDGE(NORTH)) pad_y_at = SDL_GetTicksNS();
+    if (ctx == PAD_RACE && foot_on) {
+        pad_hold(NULL, 0);
+        if (EDGE(NORTH) && !pad_y_wait) foot_req = true;
+        if (EDGE(START)) pad_tap_ctrl(0x19);
+        if (EDGE(BACK)) pad_tap(0x01);
+        if (EDGE(DPAD_UP)) pad_tap(0x23);
+        if (EDGE(DPAD_DOWN)) pad_tap(0x32);               /* the radio (the d-pad's sides change the weapon) */
+        if (EDGE(RIGHT_SHOULDER) || EDGE(DPAD_RIGHT)) foot_wcycle++;
+        if (EDGE(DPAD_LEFT)) foot_wcycle--;
+        if (EDGE(LEFT_STICK)) pad_run = !pad_run;
+        enh_chase_look(0);
+    } else if (ctx == PAD_RACE) {
         u16 want[4];
         int n = 0;
         if (pad_axis(SDL_GAMEPAD_AXIS_RIGHT_TRIGGER) > 0.25) want[n++] = GREY | 0x48;
@@ -721,7 +810,11 @@ static void pad_update(void)
         pad_hold(want, n);
         if (EDGE(EAST) || EDGE(RIGHT_SHOULDER)) pad_tap(0x1E);
         if (EDGE(WEST) || EDGE(LEFT_SHOULDER)) pad_tap(0x2C);
-        if (EDGE(NORTH)) enh_chase_toggle();
+        if (b[SDL_GAMEPAD_BUTTON_NORTH] && !pad_y_wait && !pad_y_fired &&
+            SDL_GetTicksNS() - pad_y_at >= FOOT_HOLD_MS * SDL_NS_PER_MS) {
+            pad_y_fired = true;
+            foot_req = true;
+        }
         if (EDGE(START)) pad_tap_ctrl(0x19);
         if (EDGE(BACK)) pad_tap(0x01);
         if (EDGE(DPAD_UP)) pad_tap(0x23);
@@ -778,6 +871,91 @@ bool host_pad_steer(double *pos)
 }
 
 void host_pad_steer_off(void) { pad_steer_on = false; }
+
+/* ---------------------------------------------------------------- OG: on foot (FOOT.md) */
+
+bool host_foot_request(void)
+{
+    bool r = foot_req;
+    foot_req = false;
+    return r;
+}
+
+/* OG: on foot the mouse looks (relative mode) while the window has the focus */
+static void foot_mouse_mode(void)
+{
+    if (window) SDL_SetWindowRelativeMouseMode(window, foot_on && window_focus);
+    foot_mdx = foot_mdy = 0;
+}
+
+void host_set_foot(bool on)
+{
+    foot_on = on;
+    foot_mouse_mode();
+    foot_req = false;
+    pad_y_wait = true;                            /* Y is let go before it counts again */
+    pad_run = false;
+    pad_hold(NULL, 0);                            /* the pedals let go */
+}
+
+void host_foot_weapon(int *select, int *cycle)
+{
+    *select = foot_wsel;
+    *cycle = foot_wcycle;
+    foot_wsel = foot_wcycle = 0;
+}
+
+void host_foot_mouse(double *dx, double *dy)
+{
+    *dx = foot_mdx;
+    *dy = foot_mdy;
+    foot_mdx = foot_mdy = 0;
+}
+
+/* a stick's position with a round dead zone, -1 .. 1 */
+static void stick(SDL_GamepadAxis ax, SDL_GamepadAxis ay, double dz, double *x, double *y)
+{
+    double sx = pad_axis(ax), sy = -pad_axis(ay), m = sqrt(sx * sx + sy * sy);
+    if (m <= dz) { *x = *y = 0; return; }
+    double k = ((m > 1 ? 1 : m) - dz) / (1 - dz) / m;
+    *x = sx * k;
+    *y = sy * k;
+}
+
+void host_foot_input(HostFootInput *in)
+{
+    memset(in, 0, sizeof *in);
+    const bool *k = SDL_GetKeyboardState(NULL);
+    if (k[SDL_SCANCODE_W] || k[SDL_SCANCODE_UP]) in->move_y += 1;
+    if (k[SDL_SCANCODE_S] || k[SDL_SCANCODE_DOWN]) in->move_y -= 1;
+    if (k[SDL_SCANCODE_A]) in->move_x -= 1;
+    if (k[SDL_SCANCODE_D]) in->move_x += 1;
+    if (k[SDL_SCANCODE_LEFT]) in->turn -= 1;
+    if (k[SDL_SCANCODE_RIGHT]) in->turn += 1;
+    if (k[SDL_SCANCODE_PAGEUP]) in->look += 1;
+    if (k[SDL_SCANCODE_PAGEDOWN]) in->look -= 1;
+    in->run = k[SDL_SCANCODE_LSHIFT] || k[SDL_SCANCODE_RSHIFT];
+    in->jump = k[SDL_SCANCODE_SPACE];
+    SDL_MouseButtonFlags mb = SDL_GetMouseState(NULL, NULL);       /* OG (WEAPON.md) */
+    in->fire = k[SDL_SCANCODE_F] || (mb & SDL_BUTTON_LMASK);
+    in->aim = (mb & SDL_BUTTON_RMASK) != 0;
+    in->reload = k[SDL_SCANCODE_R];
+    if (gamepad && pad_ctx == PAD_RACE) {
+        double mx, my, tx, ty;
+        stick(SDL_GAMEPAD_AXIS_LEFTX, SDL_GAMEPAD_AXIS_LEFTY, 0.15, &mx, &my);
+        stick(SDL_GAMEPAD_AXIS_RIGHTX, SDL_GAMEPAD_AXIS_RIGHTY, 0.12, &tx, &ty);
+        in->move_x += mx; in->move_y += my;
+        in->turn += tx; in->look += ty;
+        if (SDL_GetGamepadButton(gamepad, SDL_GAMEPAD_BUTTON_SOUTH)) in->jump = true;
+        if (pad_axis(SDL_GAMEPAD_AXIS_RIGHT_TRIGGER) > 0.5) in->fire = true;     /* OG (WEAPON.md) */
+        if (pad_axis(SDL_GAMEPAD_AXIS_LEFT_TRIGGER) > 0.5) in->aim = true;
+        if (SDL_GetGamepadButton(gamepad, SDL_GAMEPAD_BUTTON_WEST)) in->reload = true;
+        if (pad_run && mx * mx + my * my < 0.09) pad_run = false;   /* L3: running until the stick comes back */
+        if (pad_run || SDL_GetGamepadButton(gamepad, SDL_GAMEPAD_BUTTON_LEFT_SHOULDER)) in->run = true;
+    }
+    in->move_x = SDL_clamp(in->move_x, -1.0, 1.0); in->move_y = SDL_clamp(in->move_y, -1.0, 1.0);
+    in->turn = SDL_clamp(in->turn, -1.0, 1.0);     in->look = SDL_clamp(in->look, -1.0, 1.0);
+}
 
 /* ---------------------------------------------------------------- files, errors */
 

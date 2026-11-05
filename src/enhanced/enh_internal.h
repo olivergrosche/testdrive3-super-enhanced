@@ -4,6 +4,7 @@
 #include "enhanced.h"
 #include "../mem.h"
 #include "../symbols.h"
+#include "../host.h"
 
 #define ENH_MAX_VERTS   0x640          /* the game's vertex arrays */
 #define ENH_MAX_FACES   0x640
@@ -23,6 +24,7 @@ typedef struct {
     u16 flags;
     u16 vbase, vcount;                 /* vertices emitted this frame (moving vehicles; 0 = none) */
     u16 rbase, rcount;                 /* obj_vert_base / obj_vert_count as they are (lamp owners) */
+    u16 fbase, fcount;                 /* OG: obj_face_base / obj_face_count (what a shot hit, WEAPON.md) */
 } EnhObj;
 
 typedef struct {
@@ -64,6 +66,8 @@ typedef struct {
      * (car_nf), drawn last; the view covers the whole screen */
     bool chase;
     int  car_v0, car_nv, car_f0, car_nf;
+    /* OG: on foot (FOOT.md): the walker's eye over the whole screen (chase is set too, without the car) */
+    bool foot;
     /* OG: the cockpit's headlight beams (a screen overlay there) put back on the ground in front of the car:
      * two quads 0-3 and 2-5, world coordinates (beam_n = 0: none) */
     int  beam_n;
@@ -126,6 +130,12 @@ extern EnhPresent enh_present;
 extern int enh_scale, enh_aa, enh_motion_delay, enh_haze, enh_draw_dist;
 extern int enh_fog_start, enh_beam_night, enh_beam_day, enh_beam_soft;
 extern bool enh_lights;
+
+/* OG: on foot (FOOT.md) the front view is drawn smaller by this (a wider field of view: the original's 56 x 35
+ * degrees at 4:3 are those of a telephoto for a walker); TD3_FOOT_ZOOM to try others */
+#define ENH_FOOT_ZOOM 0.72
+double enh_foot_zoom(void);            /* the walker's zoom now (aiming down the sights narrows it; enh_gun.c) */
+
 
 /* OG: the chase view's screen: the whole 320 x 200 picture */
 #define ENH_CHASE_W    320
@@ -212,6 +222,7 @@ typedef struct {
     /* the far ring's faces also write the far depth; the game's faces are drawn only where they are nearer
      * than it (a cell the game did not build can be nearer than one it did) */
     bool zfar_write, zfar_test;
+    float unzoom;                      /* OG: P_SKY: projected rows per sample row (1 / the view's zoom; 0 = 1) */
 } EnhPrim;
 enum { Z_NONE, Z_CLEAR, Z_CONST, Z_PLANE };
 
@@ -221,6 +232,7 @@ typedef struct {
     double base;                       /* bearing units: sx - base = atan2(dx, dz) * RAD2A */
     double cam_row, roll_slope, cx32;  /* front: row = cam_row - elevation + roll_slope * (sx - cx32) */
     double mirror_base, pitch, mroll;  /* mirror: sx = mirror_base + 1600h - 2 x; row per 8b5f */
+    double zoom;                       /* OG: front: target pixels per projected pixel (the walker's wider view) */
 } EnhMap;
 
 typedef struct {
@@ -262,3 +274,54 @@ u32 enh_haze_colour(const EnhSnap *s);
 /* the game's ground under (x4, z4): the highest ground-like face there not more than `above` over y (-1e9: none) */
 double enh_ground_height(const EnhSnap *s, double x4, double z4, double y, double above);
 #define ENH_EYE_CLEAR 20.0             /* the least height of the view's eye over the ground (a steep slope) */
+
+/* ---- OG: the pistol (enh_gun.c, WEAPON.md) ---- */
+/* the aim (pad LT / right mouse) and the zoom it makes; returns how fast the view turns (1 = full) */
+double enh_gun_aim(const HostFootInput *in, bool foot, double dt);
+/* firing, reloading, the hand's motion and the particles, once per displayed frame (after the walker's view) */
+void enh_gun_frame(const EnhSnap *c, const EnhView *v, const HostFootInput *in, double dt);
+/* the particles, the gun, the crosshair and the rounds left over the composed frame (em: the frame's margins) */
+void enh_gun_draw(u32 *xrgb, const EnhSnap *s, int em);
+void enh_gun_reset(void);
+/* the particles (sparks, dust, the wrecks' smoke and flames) in every race view: moved once per displayed frame,
+ * drawn over the composed frame with the front target's column 0 / row 0 at frame VGA pixel (offx, offy), in the
+ * frame rows [y0, y1), not in the mirror's hole */
+void enh_parts_frame(const EnhSnap *c, const EnhView *v, double dt);
+void enh_parts_draw(u32 *xrgb, int em, int offx, int offy, int y0, int y1, bool hole);
+/* the zoom of the front view last built (enh_scene.c) */
+double enh_scene_zoom(void);
+/* text in the 5 x 7 font: x, y in VGA pixels of the frame (fw x fh output pixels, sc each), band = dark behind */
+void enh_text(u32 *xrgb, int fw, int fh, int sc, const char *s, int x, int y, int scale, u32 rgb, bool band);
+int  enh_text_width(const char *s, int scale);
+/* palette index -> a dark grey of the current palette (burnt-out vehicles) */
+void enh_burnt_map(u8 map[256]);
+/* polygons in frame output pixels: z orders them (larger = farther, drawn first), zd > 0: drawn only where nearer
+ * than the front target's depth (its column 0 / row 0 at frame VGA pixel (offx, offy)), frame rows [y0, y1) */
+typedef struct { double x[8], y[8], z; int n; u32 rgb; float zd; } EnhPoly;
+void enh_polys(u32 *xrgb, int em, EnhPoly *p, int n, int offx, int offy, int y0, int y1);
+/* the nearest face or tree on the line from (ox, oy, oz) along d (unit) within tmax (tmax: none), the player's own
+ * car in the chase view left out */
+double enh_ray_world(const EnhSnap *c, const EnhView *v, double ox, double oy, double oz, const double *d, double tmax);
+/* where the frame shows the 3D view: VGA pixels of the frame, w a row (NULL: everywhere) */
+void enh_draw_mask(const u8 *m, int w);
+/* a soft added glow / a soft line over the frame (output pixels) */
+void enh_glow(u32 *xrgb, int em, double cx, double cy, double r, u32 rgb, double w);
+void enh_line(u32 *xrgb, int em, double ax, double ay, double bx, double by, double th, u32 rgb, double w);
+/* a little blood where a shot went in ((bx, bz): back towards the shooter) */
+void enh_part_blood(double x, double y, double z, double bx, double bz);
+
+/* ---- OG: ambushes (enh_foes.c, FOES.md) ---- */
+void enh_foes_frame(const EnhSnap *c, const EnhView *v, double dt);
+void enh_foes_draw(u32 *xrgb, const EnhSnap *s, const EnhView *v, int em, int offx, int offy, int y0, int y1, u32 haze);
+void enh_foes_hud(u32 *xrgb, const EnhSnap *s, const EnhView *v, int em);
+int  enh_foes_ray(double ox, double oy, double oz, const double *d, double tmax, double *t, bool *head);
+int  enh_foes_damage(int i, int dmg);
+/* WEAPON.md: a dropped gun walked over: false when there is no room for it (it stays) */
+bool enh_gun_pickup(int w, int rounds);
+void enh_foes_heard(double x, double z);
+bool enh_foes_aim(double ex, double ey, double ez, double *yaw, double *look);
+/* POLICE.md: a crime of `level` (1 .. 3 stars) where the player is, if someone saw it */
+void enh_police_crime(int level);
+
+/* a world point in the last front view built: target pixel (view pixels, real), its distance; false behind */
+bool enh_front_point(double x4, double y, double z4, double *tx, double *ty, double *dist);

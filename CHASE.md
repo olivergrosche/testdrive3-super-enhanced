@@ -58,7 +58,8 @@ own keys.
 
 | Context | Pad |
 |---|---|
-| Race | RT gas (Up), LT brake (Down), A handbrake (Space), B / RB gear up (A), X / LB gear down (Z), Y chase/cockpit, Start pause (Ctrl+P), Back Esc, d-pad up lights (H), down wipers (W), left radio (M), right mirror (R), L3 back to road (F6), R3 replay (F10) |
+| Race | RT gas (Up), LT brake (Down), A handbrake (Space), B / RB gear up (A), X / LB gear down (Z), Y chase/cockpit (held 0.4 s: get out, `FOOT.md`), Start pause (Ctrl+P), Back Esc, d-pad up lights (H), down wipers (W), left radio (M), right mirror (R), L3 back to road (F6), R3 replay (F10) |
+| On foot (`FOOT.md`) | left stick walk, right stick turn / look, L3 or LB run, A jump, Y get in, Start pause, Back Esc, d-pad up lights, left radio |
 | Race, steering | left stick (`host_pad_steer` → `steer_frame`): dead zone 10 %, curve x^1.6, full lock standing, 55 % of it flat out, at most 4 locks a second |
 | Race, looking | right stick left/right up to 90°; pulled back: behind |
 | Message box | A = Y, B = N, Start = Enter, Back = Esc |

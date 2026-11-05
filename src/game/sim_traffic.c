@@ -66,7 +66,8 @@ static void moving_objects_update(void)
         if ((s16)bx < 0) break;                 /* js */
 
         DSB(DS_obj_full_transform) = 1;
-        if (DSB(DS_ext_view) == (u8)bx) {       /* sic: compares ext_view with the low byte of 2i */
+        /* OG: on foot the parked car is built like any other vehicle (the camera is the walker's) */
+        if (DSB(DS_ext_view) == (u8)bx && !(bx == 0 && foot_active())) {   /* sic: ext_view vs the low byte of 2i */
             DSB(DS_obj_full_transform) = 0;
             if (bx == 0) continue;
         }
@@ -75,7 +76,7 @@ static void moving_objects_update(void)
         DSW(DS_obj_move_dx) = 0;
         DSW(DS_dz) = 0;                         /* BCC6 obj_move_dz */
         DSW(DS_dy) = 0;                         /* BCC8 obj_move_dy */
-        if (DSB(DS_replay_state) == 0
+        if (DSB(DS_replay_state) == 0 && !weapon_frozen(bx)   /* OG: the parked car and the wrecks stay */
             && (DSB(DS_menu_preview) != 0 || (DSB(DS_ext_view) == 0 && DSB(DS_clock_running) != 0))) {
             vehicle_follow_lane(bx);            /* 5466 */
             if (!(OW(DS_obj_flags, bx) & 0x2000)) continue;   /* NB: ranges not cleared */
@@ -601,7 +602,7 @@ static void vehicle_collisions(void)
             if (b & 1) {                                        /* contact: both halt, or the player crashes */
                 OW(DS_obj_flags, bx) |= 0x9000;
                 if (si) OW(DS_obj_flags, si) |= 0x9000;
-                else DSB(DS_crash_flag) |= 1;
+                else if (!foot_active()) DSB(DS_crash_flag) |= 1;   /* OG: on foot the parked car was hit */
                 continue;
             }
             DSW(DS_dxl2) = (b & 2) ? 0x9000 : 0x8000;           /* near -> halt, close -> brake */
@@ -830,6 +831,11 @@ void police_update(void)
                     DSB(DS_place_rot)++;
                     c = (u8)(DSB(DS_pullover_count) + 1);
                     DSB(DS_pullover_count) = c;
+                    if (c >= 0x1E && weapon_wanted() > 0) {     /* OG (POLICE.md): wanted: no ticket, they get out */
+                        DSB(DS_pullover_count) = 0;
+                        weapon_police_stop((int)(bx >> 1));
+                        return;
+                    }
                     if (c >= 0x1E) {                            /* caught after 30 frames */
                         u8 s;
                         DSB(DS_sky_flash) = 3;

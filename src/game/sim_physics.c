@@ -526,6 +526,7 @@ void random_damage(void)
 void bounce_back(void)
 {
     int i;
+    if (foot_active()) return;                            /* OG: the walker meets walls in foot.c */
     DSB(DS_shake) = 4;
     for (i = 0; i < 6; i++) DSW(DS_pos_x + 2 * i) = DSW(DS_pos_hist3 + 2 * i);
 }

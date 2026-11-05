@@ -18,6 +18,8 @@
 #include "game/hud.h"
 #include "game/sim.h"
 #include "game/render.h"
+#include "game/foot.h"                 /* OG: on foot (FOOT.md) */
+#include "game/weapon.h"               /* OG: the pistol (WEAPON.md) */
 
 /* Implemented by the coordinator (main.c): every module's port set-up, before game_main():
  *     platform_init();              host tick + keyboard handlers (platform/platform.h)

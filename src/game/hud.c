@@ -51,6 +51,8 @@ void race_input(s16 phase)
     if (phase == 2) {
         key_poll(&k);                               /* 0000:0f80 */
         key_dispatch();                             /* 0e12:0084 */
+    } else if (foot_active()) {
+        /* OG: on foot the pedals and the wheel rest (FOOT.md) */
     } else {
         if (DSW(DS_joystick_on) != 0) {
             if (phase != 0 && !(phase == 1 && DSB(DS_frame_ticks) > 0x28)) goto tail;

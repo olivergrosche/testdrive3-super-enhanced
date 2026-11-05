@@ -4,12 +4,15 @@
 
 #include <math.h>
 #include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
 
 #include <SDL3/SDL.h>
 
 #include "../host.h"
 #include "game/render.h"                /* OG: obj_emit_vehicle_moving, model_emit_faces (the chase view's car) */
+#include "game/foot.h"                  /* OG: on foot (FOOT.md) */
+#include "game/weapon.h"                /* OG: the pistol (WEAPON.md) */
 
 int enh_scale = ENH_DEFAULT_RES_SCALE, enh_aa = ENH_DEFAULT_AA, enh_motion_delay = ENH_DEFAULT_MOTION_DELAY;
 int enh_haze = ENH_DEFAULT_HAZE;
@@ -89,6 +92,12 @@ static void chase_params(void)
 static bool chase_now(void)
 {
     return chase_pref && enh_keys_racing() && DSB(DS_ext_view) == 0 && DSB(DS_menu_preview) == 0;
+}
+
+/* OG: the walker's view applies to this frame (FOOT.md) */
+static bool foot_now(void)
+{
+    return foot_active() && enh_keys_racing() && DSB(DS_ext_view) == 0 && DSB(DS_menu_preview) == 0;
 }
 
 /* The player's car is not built in the cockpit view (509b skips it). For the chase view it is emitted here,
@@ -394,8 +403,9 @@ void enh_frame_drawn(void)
     /* OG: the chase view: the player's car into the game's arrays for this snapshot (put back at the end) */
     chase_params();
     CarSave car_saved;
-    s->chase = chase_now();
-    bool car = s->chase && car_emit(&car_saved);
+    s->foot = foot_now();                                 /* OG: on foot: the whole screen, no car of ours */
+    s->chase = s->foot || chase_now();
+    bool car = s->chase && !s->foot && car_emit(&car_saved);
     s->car_v0 = car ? car_saved.vert_count : 0;
     s->car_nv = car ? DSW(DS_vert_count) - car_saved.vert_count : 0;
     s->car_f0 = car ? car_saved.face_count : DSW(DS_face_count);
@@ -428,7 +438,7 @@ void enh_frame_drawn(void)
     s->cam_row = DSS(DS_cam_row);
     s->pitch = DSS(DS_pitch);
     s->roll = DSC(DS_cam_roll_94A0);
-    if (s->chase) beam_capture(s); else s->beam_n = 0;   /* OG */
+    if (s->chase && !s->foot) beam_capture(s); else s->beam_n = 0;   /* OG */
 
     s->sky_pair = DSW(DS_sky_pair);
     s->ground_pair = DSW(DS_ground_pair);
@@ -483,6 +493,18 @@ void enh_frame_drawn(void)
         e->vcount = moving ? n : 0;
         e->rbase = b;
         e->rcount = n;
+        e->fbase = DSW(DS_obj_face_base + 2 * o);          /* OG: what a shot hits (WEAPON.md) */
+        e->fcount = DSW(DS_obj_face_count + 2 * o);
+        /* OG: a wreck burnt out: its faces in the darker greys of the palette */
+        if (weapon_wrecked(o) && moving && e->fcount && e->fbase + e->fcount <= s->nf) {
+            static u8 burnt[256];
+            static u16 burnt_frame = 0xFFFF;
+            if (burnt_frame != s->frame_counter) { enh_burnt_map(burnt); burnt_frame = s->frame_counter; }
+            for (int f = e->fbase; f < e->fbase + e->fcount; f++) {
+                u16 p = s->face[f][4];
+                s->face[f][4] = (u16)(burnt[p & 0xFF] | burnt[p >> 8] << 8);
+            }
+        }
     }
 
     s->nspr = DSW(DS_sprite_vis_count);
@@ -519,6 +541,7 @@ void enh_frame_drawn(void)
     /* A continuous step: same kind of view, nothing jumped (restart, replay start, layout change). */
     EnhSnap *p = enh_prev;
     pair_ok = p->valid && p->ext_view == s->ext_view && p->menu_preview == s->menu_preview && p->chase == s->chase &&
+              p->foot == s->foot &&
               p->w32m == s->w32m && p->rows == s->rows &&
               abs(d16(s->cam_x4, p->cam_x4)) < 0x1800 && abs(d16(s->cam_z4, p->cam_z4)) < 0x1800 &&
               abs(s->cam_y - p->cam_y) < 0x200 && abs(d16(s->heading, p->heading)) < 0x2000 &&
@@ -631,6 +654,33 @@ static void chase_view(EnhView *v, const EnhSnap *c, const double *eye, u64 now)
     v->roll_slope = 0;
     v->mroll_slope = 0;
     v->roll = 0;
+}
+
+/* OG: the walker's view (FOOT.md): the eye as the view interpolates it, turned and tilted at the display rate;
+ * the gun (WEAPON.md) aims and fires in it */
+#define FOOT_ROW 100.0                                  /* the horizon's row looking level: the crosshair's */
+static void foot_view(EnhView *v, const EnhSnap *c, u64 now)
+{
+    static u64 last;
+    double dt = last ? (double)(s64)(now - last) / 1e9 : 0.0;
+    last = now;
+    if (dt < 0 || dt > 0.25) dt = 0.25;
+    double yaw, look;
+    static HostFootInput in;                              /* the last frame's for the aim's turning speed */
+    double sens = enh_gun_aim(&in, true, dt);
+    foot_view_update(dt, sens, &in, &yaw, &look);
+    static int autoaim = -1;                              /* developer aid: TD3_FOES_AUTOAIM=1 */
+    if (autoaim < 0) autoaim = SDL_getenv("TD3_FOES_AUTOAIM") != NULL;
+    if (autoaim && enh_foes_aim(v->cam_x4, v->cam_y, v->cam_z4, &yaw, &look)) foot_set_view(yaw, look);
+    double g = enh_ground_height(c, v->cam_x4, v->cam_z4, v->cam_y, 64.0);
+    if (v->cam_y < g + 3 * ENH_EYE_CLEAR) v->cam_y = g + 3 * ENH_EYE_CLEAR;
+    v->heading = yaw - floor(yaw / 65536.0) * 65536.0;
+    v->cam_row = FOOT_ROW / enh_foot_zoom() + look;       /* in the projection's rows (enh_scene.c ZOOM) */
+    v->pitch = 0;
+    v->roll_slope = 0;
+    v->mroll_slope = 0;
+    v->roll = 0;
+    enh_gun_frame(c, v, &in, dt);
 }
 
 static void view_compute(void)
@@ -753,7 +803,8 @@ static void view_compute(void)
         }
     }
     v->beam_n = 0;
-    if (c->chase && !compare_on()) {                      /* OG: the eye before the cockpit's ground clearance */
+    if (c->foot && !compare_on()) foot_view(v, c, now);   /* OG */
+    else if (c->chase && !compare_on()) {                 /* OG: the eye before the cockpit's ground clearance */
         double eye[4] = { out[0], out[1], out[2], out[3] };
         chase_view(v, c, eye, now);
     }
@@ -785,6 +836,12 @@ static void view_compute(void)
         v->spr_x[k] = (float)x;
         v->spr_y[k] = (float)y;
         v->spr_z[k] = (float)z;
+    }
+    {                                                     /* OG: sparks, dust, the wrecks' smoke (WEAPON.md) */
+        static u64 plast;
+        double pdt = plast ? (double)(s64)(now - plast) / 1e9 : 0.0;
+        plast = now;
+        if (!compare_on()) { enh_parts_frame(c, v, pdt); enh_foes_frame(c, v, pdt); }   /* OG: FOES.md */
     }
 }
 
@@ -975,6 +1032,7 @@ static void hud_put(u32 *xrgb)
         int w = (r->x1 - r->x0) * S, h = (r->y1 - r->y0) * S;
         if (!hud_buf[m]) continue;
         if (mv->lever && DSB(DS_look_rect_dirty) == 0) continue;    /* the lever's window: only while it is up */
+        if ((mv->lever || mv->ovals) && enh_cur->foot) continue;     /* OG: on foot only the top panels */
         int dx = mv->right ? 320 + 2 * EM - mv->dx0 - (r->x1 - r->x0) : mv->dx0;
         for (int j = 0; j < h; j++) {
             int oy = mv->dy0 * S + j;
@@ -989,6 +1047,14 @@ static void hud_put(u32 *xrgb)
             }
         }
     }
+}
+
+/* OG: on foot, near the car: "Y / E: GET IN" at the bottom of the screen */
+static void foot_prompt(u32 *xrgb)
+{
+    static const char text[] = "Y / E: GET IN";
+    int S = enh_scale;
+    enh_text(xrgb, (320 + 2 * EM) * S, 200 * S, S, text, EM + 160 - enh_text_width(text, 1) / 2, 176, 1, 0xFFE860, true);
 }
 
 static void paste_chase_row(int r, void *vctx)
@@ -1045,16 +1111,64 @@ bool enh_compose(u32 *xrgb, const u32 pal[256])
     if (s->chase && !compare_on()) {                      /* OG: the whole screen but the instruments */
         hud_take(xrgb);
         host_parallel_for(ENH_CHASE_ROWS, paste_chase_row, &pc);
+        {                                                   /* OG: not over a message box */
+            static u8 *mask;
+            static size_t mcap;
+            int mw = 320 + 2 * EM;
+            if ((size_t)mw * 200 > mcap) { free(mask); mcap = (size_t)mw * 200; mask = malloc(mcap); }
+            if (mask) {
+                for (int r = 0; r < 200; r++)
+                    for (int c = 0; c < mw; c++) mask[r * mw + c] = !hud_keep(c - EM, r);
+                enh_draw_mask(mask, mw);
+            }
+        }
+        enh_foes_draw(xrgb, s, &view, EM, 0, 0, 0, 200, haze_rgb);   /* OG: the gunmen (FOES.md) */
+        enh_parts_draw(xrgb, EM, 0, 0, 0, 200, false);     /* OG: sparks, dust, smoke (WEAPON.md) */
+        if (s->foot) enh_gun_draw(xrgb, s, EM);             /* OG: the gun, the crosshair, the rounds (WEAPON.md) */
         hud_put(xrgb);
+        enh_foes_hud(xrgb, s, &view, EM);                   /* OG: health, hits, messages (FOES.md) */
+        if (s->foot && foot_near_car()) foot_prompt(xrgb);  /* OG */
     } else {
         int rows = enh_present.rows < s->rows ? enh_present.rows : s->rows;
         host_parallel_for(rows, paste_front_row, &pc);
+        if (!s->menu_preview && !compare_on()) {          /* OG: the gunmen, sparks, dust, smoke in the window */
+            int ox = EM + enh_present.x0 - enh_wide_cols, oy = enh_present.y0;
+            int y0 = enh_present.y0 + enh_present.msg_rows, y1 = enh_present.y0 + rows;
+            /* only where paste_front_row put the view (not a message box, the cracks, the mirror's hole) */
+            static u8 *mask;
+            static size_t mcap;
+            int mw = 320 + 2 * EM;
+            if ((size_t)mw * 200 > mcap) { free(mask); mcap = (size_t)mw * 200; mask = malloc(mcap); }
+            if (mask) {
+                const EnhPresent *e = &enh_present;
+                const u8 *vram = mp(0xA000, 0);
+                memset(mask, 0, (size_t)mw * 200);
+                for (int r = e->msg_rows; r < rows; r++) {
+                    int sy = e->y0 + r;
+                    if (sy < 0 || sy >= 200) continue;
+                    for (int ct = 0; ct < e->w + 2 * enh_wide_cols; ct++) {
+                        int cc = ct - enh_wide_cols, sx = e->x0 + cc;
+                        if (cc >= 0 && cc < e->w) {
+                            if (sx < 0 || sx >= 320) continue;
+                            if (e->hole && r < 14 && sx >= 168 && sx < 256) continue;
+                            int vi = r * 320 + cc;
+                            if (vram[sy * 320 + sx] != e->vbuf[vi] || e->vbuf[vi] != e->fbuf[vi]) continue;
+                        } else if (sx < -EM || sx >= 320 + EM) continue;
+                        mask[sy * mw + sx + EM] = 1;
+                    }
+                }
+                enh_draw_mask(mask, mw);
+            }
+            enh_foes_draw(xrgb, s, &view, EM, ox, oy, y0, y1, haze_rgb);
+            enh_parts_draw(xrgb, EM, ox, oy, y0, y1, enh_present.hole);
+        }
         if (enh_present.mirror && s->mirror_on && enh_present.hole) host_parallel_for(19, paste_mirror_row, &pc);
         if (!s->menu_preview) {                           /* OG: the margins of the rows the 3D does not cover */
             int y0 = enh_present.y0 + enh_present.msg_rows, y1 = enh_present.y0 + rows;
             if (enh_wide_cols == 0) y0 = y1 = 0;
             fill_margins(xrgb, y0, y1);
         }
+        if (!s->menu_preview && !compare_on()) enh_foes_hud(xrgb, s, &view, EM);   /* OG (FOES.md) */
     }
 
     /* Developer aid: TD3_ENH_LOG=file appends one line per displayed frame (time, phase, camera, cost). */
@@ -1066,9 +1180,9 @@ bool enh_compose(u32 *xrgb, const u32 pal[256])
         log_state = log != NULL;
     }
     if (log) {
-        fprintf(log, "%.4f frame %u x4 %.2f z4 %.2f h %.1f row %.2f prims %d us %u speed %d keys %02X brake %d thr %d wheel %d\n",
+        fprintf(log, "%.4f frame %u x4 %.2f z4 %.2f h %.1f row %.2f prims %d us %u speed %d keys %02X brake %d thr %d wheel %d gear %d sl %d auto %d\n",
                 (double)t0 / 1e9, s->frame_counter, view.cam_x4, view.cam_z4, view.heading, view.cam_row,
-                enh_front.nprim, (unsigned)((host_time_ns() - t0) / 1000), DSS(DS_car_speed), DSB(DS_kbd_bits), DSB(DS_brake), DSB(DS_throttle), DSB(DS_steer_wheel));
+                enh_front.nprim, (unsigned)((host_time_ns() - t0) / 1000), DSS(DS_car_speed), DSB(DS_kbd_bits), DSB(DS_brake), DSB(DS_throttle), DSB(DS_steer_wheel), DSB(DS_gear), (int)DSSL(DS_speed_long), DSB(DS_auto_gearbox));
         fflush(log);
     }
     return true;

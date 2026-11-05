@@ -42,6 +42,7 @@ void race_run(void)
         u16 now = DSW(DS_tick_count);                          /* the pacing reference (iVar2) */
         if (debug_keys) DSB(DS_debug_keys) = 1;                /* ENH developer aid (see above) */
         if (DSW(DS_race_state) == 3) {                         /* leave */
+            foot_reset();                                      /* OG: back in the car (FOOT.md) */
             enh_stop();                                        /* ENH */
             enh_keys_race(false);                              /* ENH */
             if (DSB(DS_race_computer_cars) != 0) opponent_times_finalize();
@@ -53,6 +54,11 @@ void race_run(void)
             gfx_set_colour(0);
             gfx_fill_rect(0, 0x13f, 0, 199);
             return;
+        }
+        if (weapon_take_death()) {                             /* OG: shot dead (FOES.md): a life lost */
+            foot_reset();
+            life_lost(0);
+            continue;
         }
         /* PORT: the original reads DS:00A0 twice here (u8 difference, then the new frame start); no tick can
          * arrive in between in the port, so both reads are `now`. */
@@ -161,7 +167,7 @@ void race_run(void)
                         if (DSB(DS_snow_level) == 0) DSB(DS_sky_alt) = 0;
                     }
                     build_colour_remap();
-                } else if (surf == 0x1f) {
+                } else if (surf == 0x1f && !foot_active()) {   /* OG: driven in, not walked in */
                     DSW(DS_race_state) = 3;                    /* finish (gas station tile) */
                 }
             }
@@ -187,6 +193,7 @@ void car_leg_reset(void)
     u16 heading;
     s16 gh;
 
+    foot_reset();                                              /* OG: a (re)start is in the car */
     DSB(DS_mirror_dirty) = 1;
     DSB(DS_on_ground) = 0;
     DSW(DS_odo_accum) = 0;
@@ -221,6 +228,7 @@ void car_leg_reset(void)
 /* 0792:0d2e stage_load_objects — game_flow.md §4.14 (leg sprites, map, tiles, object sets, car and opponents) */
 void stage_load_objects(void)
 {
+    weapon_reset();                                            /* OG: a new leg, no wrecks */
     view_setup();
     DSB(DS_tach_step) = 0;
     DSB(DS_speedo_step) = 0;

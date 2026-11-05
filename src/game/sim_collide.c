@@ -29,6 +29,9 @@ void sprite_collisions(void)
         ah = (u8)((ax >> 8) & 0xE0);                            /* collision class */
         al = (u8)ax;
         if (ah == 0) continue;
+        /* OG: on foot (foot.c): trees and rocks stop the walker there; the windscreen and the road messages are
+         * the car's; what the car knocks over the walker knocks over without a bump or damage */
+        if (foot_active() && ah >= 0x60) continue;
         if (ah == 0x60) {                                       /* trees, rocks, crossing barrier */
             u16 cx = DSW(DS_car_speed);
             if ((s16)cx < 0) cx = (u16)-cx;
@@ -38,12 +41,12 @@ void sprite_collisions(void)
             return;
         }
         if (ah < 0x60) {                                        /* 20h / 40h: knock over */
-            DSB(DS_bump_frames) = 1;
+            if (!foot_active()) DSB(DS_bump_frames) = 1;        /* OG */
             sfx_play_ax(3);
-            DSB(DS_shake) = 5;
+            if (!foot_active()) DSB(DS_shake) = 5;              /* OG */
             OW(DS_sprite_id, bx) |= 1;
             if (ah <= 0x20) OW(DS_sprite_id, bx) = 0x001F;
-            else random_damage();                               /* 40h keeps its class */
+            else if (!foot_active()) random_damage();           /* 40h keeps its class; OG: not on foot */
             continue;
         }
         if (ah < 0xA0) {                                        /* 80h: windscreen splat */
