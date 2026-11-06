@@ -1066,6 +1066,53 @@ void enh_foes_add_armour(double a) { armour = fmin(100, armour + a); }
 int  enh_foes_stars(void) { return wnt.stars; }
 bool enh_foes_police_see(void) { return wnt.stars > 0 && seen_now; }
 void enh_foes_clear_wanted(void) { if (wnt.stars > 0) police_clear(2); }
+/* TOWNS.md "Jobs": a gang with a bounty on it: three gunmen round (x, z) (wrapped x4), no car; false while an
+ * ambush is on (it comes when that one is over) */
+bool enh_foes_gang(const EnhSnap *c, double x, double z, double y)
+{
+    if (amb.on) return false;
+    double px, py, pz;
+    player_pos(c, &px, &py, &pz);
+    double cx = px + wraps(x - px), cz = pz + wraps(z - pz);
+    static const double at[NFOE][2] = { { 0, 0 }, { 420, 180 }, { -380, 240 } };
+    double ux = wraps(cx - px), uz = wraps(cz - pz), ul = sqrt(ux * ux + uz * uz);
+    if (ul < 1) ul = 1;
+    ux /= ul; uz /= ul;
+    double qx = uz, qz = -ux;
+    for (int i = 0; i < NFOE; i++) {
+        double fx = cx + qx * at[i][0] + ux * at[i][1], fz = cz + qz * at[i][0] + uz * at[i][1];
+        double g = enh_ground_height(c, fx, fz, y + 100, 200);
+        place(&foe[i], fx, fz, g > -1e8 ? g : y, px, pz);
+    }
+    amb.on = true;
+    amb.alerted = amb.cleared = false;
+    amb.car = -1;
+    amb.cx = cx; amb.cz = cz; amb.cy = y;
+    if (SDL_getenv("TD3_FOES_DEBUG")) fprintf(stderr, "gang: at %.0f %.0f\n", cx, cz);
+    return true;
+}
+
+/* the gunmen of the ambush (or gang) on still up; -1: none on */
+int enh_foes_gang_left(void)
+{
+    if (!amb.on) return -1;
+    int n = 0;
+    for (int i = 0; i < NFOE; i++) if (foe[i].on && foe[i].hp > 0) n++;
+    return n;
+}
+
+/* TOWNS.md "Jobs": hot goods: the police know at once (at least `stars`, where the player is) */
+void enh_foes_hot(int stars)
+{
+    if (stars > wnt.stars) {
+        if (!wnt.stars) { wnt.msg = 1; wnt.msg_t = 2.5; wnt.unit_t = 0; wnt.arrived = false; wnt.since = 0; }
+        wnt.stars = stars;
+        weapon_set_wanted(stars);
+    }
+    wnt.seen_t = 0;
+    wnt.lkx = ppx; wnt.lkz = ppz; wnt.lky = ppy;
+}
+
 /* someone hostile at hand (a gunman on the alert within 60 m, an officer who sees the player): no shopping */
 bool enh_foes_danger(double x, double z)
 {

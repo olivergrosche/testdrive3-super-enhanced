@@ -131,6 +131,16 @@ int weapon_hit(int o, double amount)
 
 bool weapon_wrecked(int o) { return o > 0 && o < NOBJ && wreck[o]; }
 
+/* OG (TOWNS.md "Jobs"): a vehicle held where it is (a rival before the start, a stolen car stopped) or let go on;
+ * the hits it took */
+void weapon_hold(int o, bool on)
+{
+    if (o <= 0 || o >= NOBJ) return;
+    frozen[o] = on;
+    if (on) DSW(DS_obj_vel + 2 * o) = 0;
+}
+double weapon_hits(int o) { return o > 0 && o < NOBJ ? hits[o] : 0; }
+
 bool weapon_frozen(u16 bx)
 {
     int o = bx >> 1;

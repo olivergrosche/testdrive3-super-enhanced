@@ -93,8 +93,8 @@ static int banner_vil;
 static bool goto_done;
 
 /* a shop's menu */
-enum { IT_LEAVE, IT_INFO, IT_AMMO, IT_WEAPON, IT_ARMOUR, IT_FOOD, IT_FINE, IT_CAR_ARMOUR };
-typedef struct { char label[32]; char right[16]; int kind, arg, arg2, price; } Item;
+enum { IT_LEAVE, IT_INFO, IT_AMMO, IT_WEAPON, IT_ARMOUR, IT_FOOD, IT_FINE, IT_CAR_ARMOUR, IT_JOB };
+typedef struct { char label[32]; char right[16]; int kind, arg, arg2, price; char hint[44]; } Item;
 static struct {
     bool open;
     int b, sel, n;
@@ -244,6 +244,119 @@ static double road_dist(double X, double Z)
     return best;
 }
 
+/* The leg's roads as a network of map cells (TOWNS.md "Jobs": a job's time comes from the way by road): a cell is a
+ * node when its tile has road faces; two cells next to each other are joined when road faces of both reach their
+ * common edge at places within 6 m of each other. Built at the leg's scan. */
+static bool rnode[512];
+static double redge[512][4][2];         /* per cell and side (0 +x, 1 -x, 2 +z, 3 -z): where along it road touches it */
+static int finish_cell = -1;            /* the leg's finish: the cell whose tile has the gas station (faces 1Fh) */
+
+static void road_net(void)
+{
+    finish_cell = -1;
+    for (int c = 0; c < 512; c++) {
+        rnode[c] = false;
+        for (int e = 0; e < 4; e++) { redge[c][e][0] = 1e9; redge[c][e][1] = -1e9; }
+        int col = c & 31, row = c >> 5, zc = 15 - row;
+        u16 m = DSW(DS_leg_map + 2 * c);
+        u16 es, si;
+        int nf, nv;
+        if (!tile_model((u8)m, &es, &si, &nf, &nv)) continue;
+        u8 rot = (u8)((m >> 8) & 0xC0);
+        double ox = col * 4096.0 + 2048.0, oz = zc * 4096.0 + 2048.0;
+        u16 stride = (u16)(nv * 2), f = (u16)(si + 4 + 3 * stride);
+        for (int k = 0; k < nf; k++, f = (u16)(f + 8)) {
+            u16 w[4];
+            for (int j = 0; j < 4; j++) w[j] = rd16(es, (u16)(f + 2 * j));
+            int t = w[3] >> 11, n = (w[0] >> 14) + 1;
+            if (t == 0x1F) finish_cell = c;
+            if (t < 0x10 || t > 0x14 || n < 3) continue;
+            rnode[c] = true;
+            for (int j = 0; j < n; j++) {
+                int vi = w[j] & 0x7FF;
+                if (vi >= nv) continue;
+                double b = (s16)rd16(es, (u16)(si + 4 + stride + 2 * vi)), cc = (s16)rd16(es, (u16)(si + 4 + 2 * stride + 2 * vi));
+                double rb = b, rc = cc;
+                if (rot == 0x40)      { rb = cc; rc = -b; }
+                else if (rot == 0x80) { rb = -b; rc = -cc; }
+                else if (rot == 0xC0) { rb = -cc; rc = b; }
+                double x = ox + rb, z = oz + rc;
+                double lx = x - col * 4096.0, lz = z - zc * 4096.0;          /* within the cell, 0 .. 4096 */
+                const double tol = 64;
+                double along[4] = { lz, lz, lx, lx };
+                bool on[4] = { lx > 4096 - tol, lx < tol, lz > 4096 - tol, lz < tol };
+                for (int e = 0; e < 4; e++)
+                    if (on[e]) { redge[c][e][0] = fmin(redge[c][e][0], along[e]); redge[c][e][1] = fmax(redge[c][e][1], along[e]); }
+            }
+        }
+    }
+}
+
+/* the cell next to c on side e (0 +x, 1 -x, 2 +z, 3 -z), -1 off the map */
+static int cell_next(int c, int e)
+{
+    int col = c & 31, row = c >> 5;
+    if (e == 0) col++; else if (e == 1) col--; else if (e == 2) row--; else row++;
+    if (col < 0 || col > 31 || row < 0 || row > 15) return -1;
+    return col + row * 32;
+}
+
+/* the road cell nearest (X, Z) within two cells, -1 none */
+static int road_cell_near(double X, double Z)
+{
+    int col0 = (int)floor(X / 4096.0), zc0 = (int)floor(Z / 4096.0), best = -1;
+    double bd = 1e18;
+    for (int dc = -2; dc <= 2; dc++)
+        for (int dz = -2; dz <= 2; dz++) {
+            int col = col0 + dc, zc = zc0 + dz, row = 15 - zc;
+            if (col < 0 || col > 31 || row < 0 || row > 15) continue;
+            int c = col + row * 32;
+            if (!rnode[c]) continue;
+            double d = hypot(col * 4096.0 + 2048.0 - X, zc * 4096.0 + 2048.0 - Z);
+            if (d < bd) { bd = d; best = c; }
+        }
+    return best;
+}
+
+/* the way by road from road cell a to road cell b, metres (cell to cell, 41 m a step); -1 no way */
+static double route_cells(int a, int b)
+{
+    if (a < 0 || b < 0) return -1;
+    static int dist[512], queue[512];
+    for (int i = 0; i < 512; i++) dist[i] = -1;
+    int qh = 0, qt = 0;
+    dist[a] = 0; queue[qt++] = a;
+    while (qh < qt) {
+        int c = queue[qh++];
+        if (c == b) break;
+        for (int e = 0; e < 4; e++) {
+            int d = cell_next(c, e);
+            if (d < 0 || !rnode[d] || dist[d] >= 0) continue;
+            int back = e ^ 1;                                            /* the same edge seen from d */
+            if (redge[c][e][0] > redge[c][e][1] || redge[d][back][0] > redge[d][back][1]) continue;
+            if (redge[c][e][0] > redge[d][back][1] + 600 || redge[d][back][0] > redge[c][e][1] + 600) continue;
+            dist[d] = dist[c] + 1;
+            queue[qt++] = d;
+        }
+    }
+    if (dist[b] < 0) return -1;
+    return dist[b] * 40.96 + 20;
+}
+
+/* the way by road from (X0, Z0) to (X1, Z1) (true x4), metres; -1 no way */
+static double road_route(double X0, double Z0, double X1, double Z1)
+{
+    return route_cells(road_cell_near(X0, Z0), road_cell_near(X1, Z1));
+}
+
+/* the way by road from (X, Z) to the leg's finish, metres; -1 none */
+static double to_finish(double X, double Z)
+{
+    int f = finish_cell >= 0 && !rnode[finish_cell] ? road_cell_near((finish_cell & 31) * 4096.0 + 2048.0,
+                                                                     (15 - (finish_cell >> 5)) * 4096.0 + 2048.0) : finish_cell;
+    return route_cells(road_cell_near(X, Z), f);
+}
+
 /* the point (X, Z) inside a house's footprint (grown by `grow`)? */
 static bool inside(const Bld *b, double X, double Z, double grow)
 {
@@ -314,6 +427,7 @@ static void add_house(int m, bool stat, double ox, double oz, double oy, u8 rot,
 static void scan(void)
 {
     nbld = nvil = 0;
+    road_net();
     u16 es = DSW(DS_objects_set + 2);
     if (!es) return;
     int first = DSW(DS_obj_first_static), n = DSW(DS_obj_count);
@@ -595,6 +709,429 @@ void enh_town_dump(void)
  * The shops
  * ------------------------------------------------------------------------------------------------------ */
 
+/* ------------------------------------------------------------------------------------------------------
+ * Jobs (TOWNS.md "Jobs"): the pub's barkeeper has a parcel to take somewhere, the police station a bounty on a gang;
+ * made up at random, one at a time. While one runs, a line at the top and an arrow point the way.
+ * ------------------------------------------------------------------------------------------------------ */
+
+enum { JOB_NONE, JOB_PARCEL, JOB_EXPRESS, JOB_HOT, JOB_BOUNTY, JOB_RACE, JOB_GETAWAY, JOB_RECOVER, JOB_TAXI, JOB_N };
+static const char *const job_name[JOB_N] = { "", "PARCEL", "EXPRESS PARCEL", "HOT GOODS", "BOUNTY", "RACE", "GETAWAY",
+                                             "STOLEN CAR", "TAXI" };
+typedef struct {
+    int type, stage;
+    int from;                   /* the house that gave it (the bounty's police station) */
+    int target;                 /* the goal's house: a delivery's, the taxi's, the race's, the getaway's drop, the gang's,
+                                 * the theft's village */
+    int target2;                /* the getaway: where the loot waits */
+    double gx, gz, gy;          /* the gang's place (true x4, height units) */
+    double t_left, t;           /* seconds left (0: no limit); a stage's clock */
+    int reward;
+    int car;                    /* the rival's or the stolen car's object, 0 none */
+    u16 car_flags;              /* its flags before */
+    bool spawned, crashed;
+} Job;
+static Job job, offer[2];       /* the job running; the pub's and the police's offer (type 0: none made yet) */
+static u32 job_rng;
+
+static double job_rand(void)
+{
+    if (!job_rng) job_rng = (u32)SDL_GetTicksNS() | 1u;
+    job_rng ^= job_rng << 13; job_rng ^= job_rng >> 17; job_rng ^= job_rng << 5;
+    return (job_rng & 0xFFFFFF) / 16777216.0;
+}
+
+static const char *house_village(int i)
+{
+    return i >= 0 && i < nbld && bld[i].vil >= 0 ? vil[bld[i].vil].name : "?";
+}
+static const char *job_where(const Job *j) { return house_village(j->target); }
+
+/* a house without a service in another village than `from`'s, dmin .. dmax (x4, straight) from (X, Z), at most 40 m
+ * from a road and reachable by road from there, not `not`; -1 none */
+static int pick_house(int from, double X, double Z, double dmin, double dmax, int not)
+{
+    int cand[NBLD], nc = 0;
+    for (int pass = 0; pass < 2 && nc == 0; pass++)
+        for (int i = 0; i < nbld; i++) {
+            const Bld *b = &bld[i];
+            double d = hypot(b->X - X, b->Z - Z);
+            if (i == from || i == not || b->road > 4000) continue;
+            if (pass == 0 && (b->sv || (from >= 0 && b->vil == bld[from].vil) || d < dmin || d > dmax)) continue;
+            if (pass == 1 && d < 6000) continue;
+            if (road_route(X, Z, b->dX, b->dZ) < 0) continue;
+            cand[nc++] = i;
+        }
+    return nc ? cand[(int)(job_rand() * nc) % nc] : -1;
+}
+
+/* a parcel's time and pay for the way from (X, Z) to house t (TOWNS.md "Jobs") */
+static void delivery_terms(Job *o, double X, double Z, int t, double time_k, double pay_k)
+{
+    const Bld *b = &bld[t];
+    double m = road_route(X, Z, b->dX, b->dZ), walk = b->road / 100.0;
+    double secs = 40 + m / 10.0 + walk / 3.0, pay = fmin(60 + m * 0.3, 500);
+    if (o->type == JOB_EXPRESS) secs = 30 + m / 13.0 + walk / 4.0;
+    o->t_left = env_num("TD3_JOB_TIME", secs * time_k);
+    o->reward = ((int)(pay * pay_k) + 5) / 10 * 10;
+    if (SDL_getenv("TD3_FOES_DEBUG"))
+        fprintf(stderr, "job offer: %s to house %d: %.0f m by road (%.0f straight), %.0f m on foot, %.0f s\n",
+                job_name[o->type], t, m, hypot(b->X - X, b->Z - Z) / 100.0, walk, o->t_left);
+}
+
+/* an offer from the house `from` (kind 0: the pub, 1: the police station), at random (TD3_JOB_TYPE=n: that one) */
+static bool make_offer(int kind, int from)
+{
+    Job *o = &offer[kind];
+    memset(o, 0, sizeof *o);
+    if (from < 0 || from >= nbld) return false;
+    const Bld *f = &bld[from];
+    o->from = from;
+    o->target2 = -1;
+    double r = job_rand();
+    int want = (int)env_num("TD3_JOB_TYPE", 0);
+    if (kind == 1) o->type = want ? want : r < 0.55 ? JOB_BOUNTY : JOB_RECOVER;
+    else o->type = want ? want : r < 0.22 ? JOB_PARCEL : r < 0.35 ? JOB_EXPRESS : r < 0.45 ? JOB_HOT :
+                                 r < 0.65 ? JOB_RACE : r < 0.80 ? JOB_GETAWAY : JOB_TAXI;
+    switch (o->type) {
+    case JOB_BOUNTY: case JOB_RECOVER: {
+        int t = pick_house(from, f->X, f->Z, 20000, 70000, -1);
+        if (t < 0) return false;
+        const Bld *b = &bld[t];
+        o->target = t;
+        o->gx = b->dX + b->nx * 500; o->gz = b->dZ + b->nz * 500; o->gy = b->gy;   /* before its door */
+        o->reward = o->type == JOB_BOUNTY ? 300 + 50 * (int)(job_rand() * 5) : 250 + 50 * (int)(job_rand() * 4);
+        return true;
+    }
+    case JOB_RACE: {                                                 /* a village ahead, on the way to the finish */
+        double here = to_finish(f->X, f->Z);
+        int cand[NBLD], nc = 0;
+        for (int i = 0; i < nbld && here > 0; i++) {
+            const Bld *b = &bld[i];
+            if (b->vil == f->vil || b->road > 4000) continue;
+            double m = road_route(f->X, f->Z, b->dX, b->dZ), there = to_finish(b->dX, b->dZ);
+            if (m < 300 || m > 1300 || there < 0 || there > here - 200) continue;
+            cand[nc++] = i;
+        }
+        if (!nc) { o->type = JOB_PARCEL; break; }                     /* nothing ahead: a parcel instead */
+        o->target = cand[(int)(job_rand() * nc) % nc];
+        o->reward = 200 + 50 * (int)(job_rand() * 5);
+        o->t_left = 0;
+        if (SDL_getenv("TD3_FOES_DEBUG"))
+            fprintf(stderr, "job offer: RACE to house %d (%s), %.0f m by road\n", o->target, house_village(o->target),
+                    road_route(f->X, f->Z, bld[o->target].dX, bld[o->target].dZ));
+        return true;
+    }
+    case JOB_GETAWAY: {                                              /* the loot somewhere, the drop somewhere else */
+        int a = pick_house(from, f->X, f->Z, 12000, 60000, -1);
+        if (a < 0) return false;
+        int b = pick_house(a, bld[a].X, bld[a].Z, 15000, 70000, from);
+        if (b < 0) return false;
+        o->target2 = a;
+        o->target = b;
+        o->reward = 500 + 100 * (int)(job_rand() * 5);
+        return true;
+    }
+    default: break;
+    }
+    int t = pick_house(from, f->X, f->Z, 12000, 70000, -1);
+    if (t < 0) return false;
+    o->target = t;
+    if (o->type == JOB_TAXI) delivery_terms(o, f->X, f->Z, t, 1.15, 1.2);
+    else delivery_terms(o, f->X, f->Z, t, 1.0, o->type == JOB_EXPRESS ? 1.6 : o->type == JOB_HOT ? 2.2 : 1.0);
+    return true;
+}
+
+/* a car of the job let go (the rival, the stolen car): its flags back, moving on */
+static void job_release_car(void)
+{
+    if (job.car > 0) {
+        weapon_hold(job.car, false);
+        if (job.car_flags) DSW(DS_obj_flags + 2 * job.car) = job.car_flags;
+    }
+    job.car = 0;
+}
+
+static void job_end(const char *msg, bool good)
+{
+    if (!job.type) return;
+    job_release_car();
+    if (good) {
+        static const char *const why[JOB_N] = { "", "DELIVERED", "DELIVERED", "DELIVERED", "BOUNTY", "RACE WON", "GETAWAY",
+                                                "CAR RETURNED", "FARE" };
+        enh_money_add(job.reward, why[job.type]);
+        centre_msg(msg, 0x80FF80, 3.0);
+    } else { centre_msg(msg, 0xFF6050, 3.0); pcm_sfx_play(PCM_DENY, 0.7, 0); }
+    if (SDL_getenv("TD3_FOES_DEBUG")) fprintf(stderr, "job: %s (%s)\n", msg, job_name[job.type]);
+    memset(&job, 0, sizeof job);
+}
+
+static void job_paid(const char *what)
+{
+    char t[48];
+    snprintf(t, sizeof t, "%s +$%d", what, job.reward);
+    job_end(t, true);
+}
+
+static void accept_job(int kind)
+{
+    job = offer[kind];
+    memset(&offer[kind], 0, sizeof offer[kind]);                     /* a new one next time */
+    job.car = 0;
+    if (job.type == JOB_HOT) enh_foes_hot(2);                        /* the police know at once */
+    pcm_sfx_play(PCM_PICKUP, 0.8, 0);
+    if (SDL_getenv("TD3_FOES_DEBUG"))
+        fprintf(stderr, "job: %s to %s (house %d), $%d, %.0f s\n", job_name[job.type], job_where(&job), job.target, job.reward, job.t_left);
+}
+
+/* an object's place (true x4 / wrapped alike: within 8 cells wraps() compares them) */
+static void obj_place(int o, double *x, double *z)
+{
+    *x = DSW(DS_obj_x + 2 * o) * 4.0;
+    *z = DSW(DS_obj_z + 2 * o) * 4.0;
+}
+
+/* where the arrow points now (false: none) and its label */
+static bool job_goal(double *x, double *z, const char **label)
+{
+    const Bld *b = job.target >= 0 && job.target < nbld ? &bld[job.target] : NULL;
+    if (!b) return false;
+    *x = b->dX; *z = b->dZ;
+    *label = "DROP";
+    switch (job.type) {
+    case JOB_BOUNTY:
+        if (job.stage == 2) { *x = bld[job.from].dX; *z = bld[job.from].dZ; *label = "POLICE"; return true; }
+        *x = job.gx; *z = job.gz; *label = "GANG";
+        return true;
+    case JOB_RACE:
+        *label = "FINISH";
+        return job.stage == 2;
+    case JOB_TAXI:
+        return job.stage == 1;
+    case JOB_GETAWAY:
+        if (job.stage == 0) { *x = bld[job.target2].dX; *z = bld[job.target2].dZ; *label = "LOOT"; }
+        return true;
+    case JOB_RECOVER:
+        if (job.stage >= 1 && job.car > 0) { obj_place(job.car, x, z); *label = job.stage == 1 ? "STOLEN" : "CAR"; return true; }
+        *label = "THEFT";
+        return true;
+    default: return true;
+    }
+}
+
+/* where a ring shows the door to walk into (false: none) */
+static bool job_ring(int *house)
+{
+    switch (job.type) {
+    case JOB_PARCEL: case JOB_EXPRESS: case JOB_HOT: case JOB_TAXI: *house = job.target; return job.type != JOB_TAXI || job.stage == 1;
+    case JOB_GETAWAY: *house = job.stage == 0 ? job.target2 : job.target; return true;
+    default: return false;
+    }
+}
+
+/* the walker in the ring before house i's door */
+static bool at_door(const EnhSnap *c, int i, bool foot, double feet)
+{
+    Bld *b = &bld[i];
+    if (fabs(b->dX - TX) > 30000 || fabs(b->dZ - TZ) > 30000) return false;
+    double dx = wraps(b->dX - px), dz = wraps(b->dZ - pz), d = sqrt(dx * dx + dz * dz);
+    if (d < 9000) {                                                  /* the ground at the door, once it is built */
+        double g = enh_ground_height(c, b->dX, b->dZ, b->y + 80, 160);
+        if (g > -1e8) { b->gy = g; b->gy_ok = true; }
+    }
+    return foot && d < DOOR_R && fabs(feet - b->gy) < 90;
+}
+
+/* a moving vehicle the job may take: no police, no train, not wrecked or held; the opponents only if `opp` */
+static bool job_car_ok(int o, bool opp)
+{
+    if (o <= 0 || o >= DSW(DS_obj_a475) || o >= 160) return false;
+    u16 f = DSW(DS_obj_flags + 2 * o);
+    u8 m = (u8)(f & 0x3F);
+    if (!(f & 0x2000) || m == 0x11 || m == 0x30 || (m >= 0x12 && m <= 0x14)) return false;
+    if (weapon_wrecked(o) || weapon_frozen((u16)(2 * o))) return false;
+    bool is_opp = DSB(DS_race_computer_cars) != 0 && o <= 2;
+    return opp || !is_opp;
+}
+
+static void job_frame(const EnhSnap *c, bool foot, double feet, double dt)
+{
+    if (!job.type) return;
+    if (job.target < 0 || job.target >= nbld) { memset(&job, 0, sizeof job); return; }
+    Bld *b = &bld[job.target];
+    job.t += dt;
+    if (job.t_left > 0 && !(job.type == JOB_TAXI && job.stage == 0)) {
+        job.t_left -= dt;
+        if (job.t_left <= 0) { job_end("TOO LATE - JOB FAILED", false); return; }
+    }
+    double dx = wraps(b->dX - px), dz = wraps(b->dZ - pz), d = sqrt(dx * dx + dz * dz);
+    bool near = fabs(b->dX - TX) < 30000 && fabs(b->dZ - TZ) < 30000;
+    switch (job.type) {
+    case JOB_PARCEL: case JOB_EXPRESS: case JOB_HOT:
+        if (at_door(c, job.target, foot, feet)) job_paid("DELIVERED!");
+        return;
+
+    case JOB_TAXI: {                                                 /* the fare gets in with you; no crashes; stop at the door */
+        bool crashed = DSB(DS_crashed) != 0;
+        if (job.stage == 0) { if (!foot) { job.stage = 1; centre_msg("YOUR FARE IS IN. DRIVE CAREFULLY", 0xF0E070, 2.5); } }
+        else {
+            if (crashed && !job.crashed) { job_end("YOUR FARE JUMPED OUT - JOB FAILED", false); return; }
+            if (!foot && near && d < b->road + 2500 && DSW(DS_car_speed) < 5) job_paid("THANKS FOR THE RIDE!");
+        }
+        job.crashed = crashed;
+        return;
+    }
+
+    case JOB_GETAWAY:
+        if (job.stage == 0) {
+            if (at_door(c, job.target2, foot, feet)) {
+                job.stage = 1;
+                enh_foes_hot(3);
+                centre_msg("GOT THE LOOT - LOSE THE COPS!", 0xFF6050, 3.0);
+            }
+            return;
+        }
+        if (at_door(c, job.target, foot, feet)) {
+            if (enh_foes_stars() == 0) job_paid("CLEAN GETAWAY!");
+            else if (cmsg.t_left <= 0) centre_msg("TOO HOT - LOSE THE COPS FIRST", 0xFF6050, 2.0);
+        }
+        return;
+
+    case JOB_BOUNTY: {                                               /* the gang near its place; back to the police to be paid */
+        if (job.stage == 0) {
+            double gx = wraps(job.gx - px), gz = wraps(job.gz - pz);
+            if (near && gx * gx + gz * gz < 9000.0 * 9000.0 && enh_foes_gang(c, job.gx, job.gz, job.gy)) job.stage = 1;
+            return;
+        }
+        if (job.stage == 1) {
+            int left = enh_foes_gang_left();
+            if (left == 0) { job.stage = 2; centre_msg("GANG DOWN - BACK TO THE POLICE", 0x80FF80, 3.0); }
+            else if (left < 0) job.stage = 0;                        /* left behind: they wait there again */
+            return;
+        }
+        if (at_door(c, job.from, foot, feet)) job_paid("BOUNTY COLLECTED!");
+        return;
+    }
+
+    case JOB_RACE: {
+        if (job.stage == 0) { if (!foot) { job.stage = 1; job.t = 0; } return; }
+        if (job.stage == 1) {                                        /* a rival near: the opponent, else a car going there */
+            if (foot) return;
+            if (!job.car) {
+                int best = 0;
+                double bd = 15000.0 * 15000.0;
+                int n = DSW(DS_obj_a475);
+                for (int o = 1; o < n && o < 160; o++) {
+                    if (!job_car_ok(o, true)) continue;
+                    double ox, oz;
+                    obj_place(o, &ox, &oz);
+                    double ex = wraps(ox - px), ez = wraps(oz - pz), e = ex * ex + ez * ez;
+                    bool opp = DSB(DS_race_computer_cars) != 0 && o <= 2;
+                    if (!opp) {                                      /* traffic: heading towards the goal */
+                        double h = (u16)(DSW(DS_obj_heading + 2 * o) + 0x4000) * A2RAD;
+                        double tx = wraps(b->dX - ox), tz = wraps(b->dZ - oz), tl = sqrt(tx * tx + tz * tz);
+                        if (tl < 1 || (sin(h) * tx + cos(h) * tz) / tl < 0.3) continue;
+                    }
+                    if (opp) e *= 0.25;                              /* the opponent first */
+                    if (e < bd) { bd = e; best = o; }
+                }
+                if (!best) {
+                    if (job.t > 45) job_end("NOBODY SHOWED UP - RACE OFF", false);
+                    return;
+                }
+                job.car = best;
+                job.car_flags = DSW(DS_obj_flags + 2 * best);
+                weapon_hold(best, true);
+                job.t = 0;
+                if (SDL_getenv("TD3_FOES_DEBUG")) fprintf(stderr, "job: rival %d\n", best);
+                return;
+            }
+            if (job.t > 3.0) {                                       /* go */
+                job.stage = 2;
+                weapon_hold(job.car, false);
+                bool opp = DSB(DS_race_computer_cars) != 0 && job.car <= 2;
+                if (!opp) DSW(DS_obj_flags + 2 * job.car) = (u16)(job.car_flags | 0x00C0);   /* the fastest speed class */
+                centre_msg("GO!", 0x80FF80, 1.2);
+                pcm_sfx_play(PCM_PICKUP, 1.0, 0);
+            }
+            return;
+        }
+        /* the race: the first within 30 m (the rival: of the road there) of the goal wins */
+        if (near && d < b->road + 3000) { job_paid("YOU WON THE RACE!"); return; }
+        if (job.car > 0) {
+            if (weapon_wrecked(job.car)) { job_paid("YOUR RIVAL IS OUT!"); return; }
+            double ox, oz;
+            obj_place(job.car, &ox, &oz);
+            double ex = wraps(b->dX - ox), ez = wraps(b->dZ - oz);
+            if (sqrt(ex * ex + ez * ez) < b->road + 2500) { job_end("YOUR RIVAL WON - RACE LOST", false); return; }
+        }
+        if (job.t > 300) job_end("RACE OFF", false);
+        return;
+    }
+
+    case JOB_RECOVER: {
+        if (job.stage == 0) {                                        /* at the village the thief drives off */
+            if (!near || d > 15000) return;
+            int best = 0;
+            double bd = (job.t > 40 ? 40000.0 : 25000.0) * (job.t > 40 ? 40000.0 : 25000.0);
+            int n = DSW(DS_obj_a475);
+            for (int o = 1; o < n && o < 160; o++) {
+                if (!job_car_ok(o, false)) continue;
+                double ox, oz;
+                obj_place(o, &ox, &oz);
+                double ex = wraps(ox - px), ez = wraps(oz - pz), e = ex * ex + ez * ez;
+                if (e < bd) { bd = e; best = o; }
+            }
+            if (!best) {
+                static double dbg_t;
+                if (SDL_getenv("TD3_FOES_DEBUG") && (dbg_t += dt) > 2) {
+                    dbg_t = 0;
+                    double nd = 1e18;
+                    int nn = 0, all = 0;
+                    for (int o = 1; o < n && o < 160; o++) {
+                        if (DSW(DS_obj_flags + 2 * o) & 0x2000) all++;
+                        if (!job_car_ok(o, false)) continue;
+                        nn++;
+                        double ox, oz;
+                        obj_place(o, &ox, &oz);
+                        nd = fmin(nd, hypot(wraps(ox - px), wraps(oz - pz)));
+                    }
+                    fprintf(stderr, "job: no car to steal yet (%d moving, %d free, nearest %.0f)\n", all, nn, nd);
+                }
+                return;
+            }
+            job.car = best;
+            job.car_flags = DSW(DS_obj_flags + 2 * best);
+            DSW(DS_obj_flags + 2 * best) = (u16)(job.car_flags | 0x00C0);   /* away, as fast as it goes */
+            u16 w = DSW(DS_obj_waypoint + 2 * best);
+            if (!(w & 0xFFC0)) DSW(DS_obj_waypoint + 2 * best) = (u16)(w + 0x40);   /* a parked one wakes */
+            job.stage = 1;
+            job.t = 0;
+            centre_msg("THERE IT GOES - STOP IT!", 0xFF6050, 2.5);
+            if (SDL_getenv("TD3_FOES_DEBUG")) fprintf(stderr, "job: stolen car %d\n", best);
+            return;
+        }
+        if (weapon_wrecked(job.car)) { job_end("YOU WRECKED IT - JOB FAILED", false); return; }
+        double ox, oz;
+        obj_place(job.car, &ox, &oz);
+        double ex = wraps(ox - px), ez = wraps(oz - pz), e = sqrt(ex * ex + ez * ez);
+        if (job.stage == 1) {
+            if (e > 50000) { job_end("IT GOT AWAY - JOB FAILED", false); return; }
+            if (weapon_hits(job.car) >= 2.0) {                       /* two pistol rounds stop it (five wreck it) */
+                weapon_hold(job.car, true);
+                DSW(DS_obj_flags + 2 * job.car) = job.car_flags;
+                job.car_flags = 0;
+                job.stage = 2;
+                centre_msg("IT STOPPED - THE THIEF RUNS. GET TO THE CAR", 0x80FF80, 3.0);
+            }
+            return;
+        }
+        if (e < 600) job_paid("CAR RECOVERED!");
+        return;
+    }
+    default: return;
+    }
+}
+
 static void item(const char *label, int kind, int arg, int arg2, int price, const char *right)
 {
     if (menu.n >= 8) return;
@@ -604,6 +1141,32 @@ static void item(const char *label, int kind, int arg, int arg2, int price, cons
     if (right) snprintf(t->right, sizeof t->right, "%s", right);
     else if (price > 0) snprintf(t->right, sizeof t->right, "$%d", price);
     else t->right[0] = 0;
+    t->hint[0] = 0;
+}
+
+/* the job line of the pub's or the police station's menu: the offer, or the job running */
+static void job_item(int kind)
+{
+    if (job.type) {
+        item(job.type == JOB_BOUNTY ? "BOUNTY ON" : "JOB ON", IT_INFO, 0, 0, 0, NULL);
+        snprintf(menu.it[menu.n - 1].hint, sizeof menu.it[0].hint, "%s: %s", job_name[job.type], job_where(&job));
+        return;
+    }
+    if (!offer[kind].type && !make_offer(kind, menu.b)) return;
+    const Job *o = &offer[kind];
+    char label[32], pay[16];
+    snprintf(label, sizeof label, "JOB: %s", job_name[o->type]);
+    snprintf(pay, sizeof pay, "+$%d", o->reward);                      /* paid, not a price */
+    item(label, IT_JOB, kind, 0, o->reward, pay);
+    Item *t = &menu.it[menu.n - 1];
+    switch (o->type) {
+    case JOB_BOUNTY: snprintf(t->hint, sizeof t->hint, "A GANG HIDES AT %s", job_where(o)); break;
+    case JOB_RECOVER: snprintf(t->hint, sizeof t->hint, "A CAR WAS STOLEN AT %s", job_where(o)); break;
+    case JOB_RACE: snprintf(t->hint, sizeof t->hint, "A LOCAL RACES YOU TO %s", job_where(o)); break;
+    case JOB_GETAWAY: snprintf(t->hint, sizeof t->hint, "LOOT AT %s", house_village(o->target2)); break;
+    case JOB_TAXI: snprintf(t->hint, sizeof t->hint, "A FARE TO %s IN %d:%02d", job_where(o), (int)o->t_left / 60, (int)o->t_left % 60); break;
+    default: snprintf(t->hint, sizeof t->hint, "TO %s IN %d:%02d", job_where(o), (int)o->t_left / 60, (int)o->t_left % 60); break;
+    }
 }
 
 static void build_items(void)
@@ -624,6 +1187,7 @@ static void build_items(void)
         item("BODY ARMOUR", IT_ARMOUR, 100, 0, 150, enh_foes_armour() > 99 ? "FULL" : NULL);
         break;
     case SV_PUB:
+        job_item(0);
         item("BEER", IT_FOOD, 10, 1, 5, NULL);
         item("BURGER AND FRIES", IT_FOOD, 35, 0, 15, NULL);
         item("STEAK DINNER", IT_FOOD, 100, 0, 40, NULL);
@@ -637,6 +1201,7 @@ static void build_items(void)
         char t[32];
         snprintf(t, sizeof t, "PAY YOUR FINE");
         item(t, IT_FINE, 0, 0, st * FINE_STAR, st ? NULL : "NONE");
+        job_item(1);
         snprintf(t, sizeof t, "$%d", ENH_BAIL);
         item("BAIL IF BUSTED", IT_INFO, 0, 0, 0, t);
         break;
@@ -686,7 +1251,17 @@ static void buy(const Item *t)
     int rounds, room;
     switch (t->kind) {
     case IT_LEAVE: close_menu(); return;
+    case IT_JOB:
+        if (job.type) { note("ONE JOB AT A TIME", false); return; }
+        accept_job(t->arg);
+        {
+            static const char *const say[JOB_N] = { "", "DON'T BE LATE", "DON'T BE LATE", "THE COPS KNOW. HURRY!", "GO GET THEM",
+                                                    "GET IN YOUR CAR", "PICK IT UP. QUIETLY.", "FIND THAT CAR", "YOUR FARE WAITS AT THE CAR" };
+            note(say[job.type], true);
+        }
+        break;
     case IT_INFO:
+        if (!strcmp(t->label, "JOB ON") || !strcmp(t->label, "BOUNTY ON")) { note("FINISH THE ONE YOU HAVE", true); return; }
         if (bld[menu.b].sv == SV_GARAGE) note("DRIVE INTO THE BAY OUTSIDE", true);
         else note("PAID HERE OR AT ARREST", true);
         return;
@@ -767,7 +1342,26 @@ void enh_town_frame(const EnhSnap *c, const EnhView *v, double dt)
         close_menu();
         last_vil = -1;
         goto_done = false;
+        memset(offer, 0, sizeof offer);
+        if (job.type) job_end("JOB LOST", false);
         if (SDL_getenv("TD3_TOWN_DUMP")) enh_town_dump();
+        {   /* developer aid TD3_JOB=1..4 (parcel, express, hot goods, bounty): a job at once, from the nearest pub
+             * (police station) */
+            int want = (int)env_num("TD3_JOB", 0);
+            if (want >= 1 && want < JOB_N) {
+                int kind = want == JOB_BOUNTY || want == JOB_RECOVER, from = -1;
+                double bd = 1e18, tx = (u32)DSL(DS_pos_x) / 32.0, tz = (u32)DSL(DS_pos_z) / 32.0;
+                for (int i = 0; i < nbld; i++) {
+                    if (bld[i].sv != (kind ? SV_POLICE : SV_PUB)) continue;
+                    double d = hypot(bld[i].X - tx, bld[i].Z - tz);
+                    if (d < bd) { bd = d; from = i; }
+                }
+                SDL_SetEnvironmentVariable(SDL_GetEnvironment(), "TD3_JOB_TYPE", SDL_getenv("TD3_JOB"), true);
+                for (int tries = 0; tries < 40 && from >= 0; tries++)
+                    if (make_offer(kind, from) && offer[kind].type == want) { accept_job(kind); break; }
+                SDL_UnsetEnvironmentVariable(SDL_GetEnvironment(), "TD3_JOB_TYPE");
+            }
+        }
     }
     /* the race's money: afresh with a new race, a prize per leg, tickets and the hospital cost */
     if (!counters_ok || weapon_races() != races_seen) {
@@ -789,6 +1383,7 @@ void enh_town_frame(const EnhSnap *c, const EnhView *v, double dt)
     }
     if (weapon_deaths() != deaths_seen) {
         deaths_seen = weapon_deaths();
+        if (job.type) job_end("JOB FAILED", false);
         charge(HOSPITAL, "HOSPITAL");
         beer = 0;
         close_menu();
@@ -816,6 +1411,13 @@ void enh_town_frame(const EnhSnap *c, const EnhView *v, double dt)
     }
     px = c->cam_x4; pz = c->cam_z4; py = c->cam_y;
     TX = (u32)DSL(DS_pos_x) / 32.0; TZ = (u32)DSL(DS_pos_z) / 32.0;
+    {   /* developer aid TD3_POS_LOG=1: the player's place (true x4) and the car's speed once a second */
+        static double plog_t;
+        if (SDL_getenv("TD3_POS_LOG") && (plog_t += dt) > 1.0) {
+            plog_t = 0;
+            fprintf(stderr, "pos: %.0f %.0f speed %u\n", TX, TZ, DSW(DS_car_speed));
+        }
+    }
     bool foot = foot_active();
     double feet = foot ? py - 70 : py - 46;
 
@@ -863,6 +1465,40 @@ void enh_town_frame(const EnhSnap *c, const EnhView *v, double dt)
             if (dg > BAY_R * 2.5) b->armed_car = true;
             if (dg < BAY_R && b->armed_car && DSW(DS_car_speed) < 12) { b->armed_car = false; respray(); }
         }
+    }
+
+    job_frame(c, foot, feet, dt);                                        /* TOWNS.md "Jobs" */
+    {   /* developer aid TD3_JOB_GOTO=1: out of the car, the walker is put 3 m before the job's goal, once a stage (a
+         * bounty's gang: 40 m off; the taxi and the race: the car too, beside the walker); TD3_JOB_SHOOT=1: the stolen
+         * car takes two hits 2 s after it drove off */
+        static int jg_stage = -1, jg_type;
+        if (!job.type) jg_stage = -1;
+        if (job.type && (job.stage != jg_stage || job.type != jg_type) && foot && env_num("TD3_JOB_GOTO", 0) > 0 &&
+            !(job.type == JOB_RECOVER && job.stage == 1) && !(job.type == JOB_BOUNTY && job.stage == 1)) {
+            jg_stage = job.stage; jg_type = job.type;
+            const Bld *b = &bld[job.target];
+            double gx, gz;
+            const char *lab;
+            if (!job_goal(&gx, &gz, &lab)) { gx = b->dX; gz = b->dZ; }
+            if (job.type == JOB_GETAWAY && job.stage == 0) b = &bld[job.target2];
+            if (job.type == JOB_BOUNTY && job.stage == 2) b = &bld[job.from];
+            double off = job.type == JOB_BOUNTY && job.stage == 0 ? 4000 : job.type == JOB_RECOVER && job.stage == 0 ? 6000 : 300;
+            foot_teleport(gx + b->nx * off, gz + b->nz * off, b->y + 2);
+            foot_set_view(atan2(-b->nx, -b->nz) / A2RAD, 0);
+            if (job.type == JOB_TAXI || job.type == JOB_RACE) {
+                u16 h = (u16)(atan2(-b->nz, b->nx) / A2RAD);
+                foot_move_car(gx + b->nx * 300 + b->nz * 300, gz + b->nz * 300 - b->nx * 300, b->y, h);
+            }
+            fprintf(stderr, "job: walker put before the goal (%s, stage %d)\n", job_where(&job), job.stage);
+        }
+        static double js_t;
+        if ((job.type == JOB_RECOVER || job.type == JOB_BOUNTY) && job.stage == 1 && env_num("TD3_JOB_SHOOT", 0) > 0) {
+            if ((js_t += dt) > 2.0) {                                    /* the stolen car: two hits; the gang: down */
+                if (job.type == JOB_RECOVER) { weapon_hit(job.car, 1.0); weapon_hit(job.car, 1.0); }
+                else for (int i = 0; i < 3; i++) enh_foes_damage(i, 999);
+                js_t = -1e9;
+            }
+        } else js_t = 0;
     }
 
     /* the shop's menu */
@@ -1010,6 +1646,24 @@ void enh_town_draw(u32 *xrgb, const EnhSnap *s, const EnhView *v, int em, int of
         }
         (void)camy;
     }
+    /* TOWNS.md "Jobs": the door to deliver to, a pale yellow ring */
+    int ring_house;
+    if (job.type && job_ring(&ring_house) && ring_house >= 0 && ring_house < nbld) {
+        const Bld *b = &bld[ring_house];
+        if (fabs(b->X - TXv) < 16000 && fabs(b->Z - TZv) < 16000) {
+            double mx = b->dX, mz = b->dZ, r = DOOR_R, ri = r * 0.7, g = b->gy + 1.5;
+            for (int k = 0; k < 18; k++) {
+                double a0 = k * 2 * M_PI / 18, a1 = (k + 1) * 2 * M_PI / 18;
+                double sx = wraps(mx + sin((a0 + a1) / 2) * r - camx), sz = wraps(mz + cos((a0 + a1) / 2) * r - camz);
+                if (sx * sx + sz * sz < 160.0 * 160.0) continue;
+                double w[4][3] = {
+                    { mx + sin(a0) * r, g, mz + cos(a0) * r }, { mx + sin(a1) * r, g, mz + cos(a1) * r },
+                    { mx + sin(a1) * ri, g, mz + cos(a1) * ri }, { mx + sin(a0) * ri, g, mz + cos(a0) * ri } };
+                for (int q = 0; q < 4; q++) { w[q][0] = camx + wraps(w[q][0] - camx); w[q][2] = camz + wraps(w[q][2] - camz); }
+                quad(w, s->day ? 0xF0E070 : 0x9A9048, 40, S, offx, offy);
+            }
+        }
+    }
     enh_polys(xrgb, em, polys, npoly, offx, offy, y0, y1);
     /* the signs' words, as large as fit */
     int FW = (320 + 2 * em) * S, FH = 200 * S;
@@ -1076,6 +1730,70 @@ void enh_town_hud(u32 *xrgb, const EnhSnap *s, const EnhView *v, int em)
             enh_text(xrgb, FW, FH, S, mline[i].t, lx, y + 12 + i * 9, 1, mline[i].d >= 0 ? 0x80FF80 : 0xFF7060, false);
         }
     }
+    /* TOWNS.md "Jobs": what to do, how long, and an arrow to the goal (only while a job runs) */
+    if (job.type && !menu.open && job.target >= 0 && job.target < nbld) {
+        /* short (at most about 34 characters: between the original's boxes at the top) */
+        char t[72], tm[16] = "", sub[40] = "";
+        if (job.t_left > 0) snprintf(tm, sizeof tm, "  %d:%02d", (int)job.t_left / 60, (int)job.t_left % 60);
+        switch (job.type) {
+        case JOB_BOUNTY:
+            if (job.stage == 2) snprintf(t, sizeof t, "BACK TO POLICE: %s", house_village(job.from));
+            else if (job.stage == 1) snprintf(t, sizeof t, "GANG: %d LEFT", enh_foes_gang_left() > 0 ? enh_foes_gang_left() : 0);
+            else snprintf(t, sizeof t, "GANG AT %s", job_where(&job));
+            break;
+        case JOB_RACE:
+            if (job.stage == 0) snprintf(t, sizeof t, "RACE > %s: GET IN", job_where(&job));
+            else if (job.stage == 1) snprintf(t, sizeof t, job.car ? "RACE > %s: READY" : "RACE > %s: NO RIVAL YET", job_where(&job));
+            else {
+                double ox, oz;
+                obj_place(job.car, &ox, &oz);
+                const Bld *b = &bld[job.target];
+                double me = hypot(wraps(b->dX - v->cam_x4), wraps(b->dZ - v->cam_z4)), him = hypot(wraps(b->dX - ox), wraps(b->dZ - oz));
+                snprintf(t, sizeof t, "RACE > %s", job_where(&job));
+                snprintf(sub, sizeof sub, "RIVAL %dM %s", (int)(fabs(me - him) / 100), him < me ? "AHEAD" : "BEHIND");
+            }
+            break;
+        case JOB_GETAWAY:
+            if (job.stage == 0) snprintf(t, sizeof t, "LOOT AT %s", house_village(job.target2));
+            else snprintf(t, sizeof t, enh_foes_stars() ? "COPS! DROP > %s" : "DROP THE LOOT > %s", job_where(&job));
+            break;
+        case JOB_RECOVER:
+            if (job.stage == 0) snprintf(t, sizeof t, "STOLEN CAR AT %s", job_where(&job));
+            else if (job.stage == 1) snprintf(t, sizeof t, "STOP IT - DON'T WRECK IT");
+            else snprintf(t, sizeof t, "GET TO THE CAR");
+            break;
+        case JOB_TAXI:
+            if (job.stage == 0) snprintf(t, sizeof t, "TAXI: GET IN%s", tm);
+            else snprintf(t, sizeof t, "TAXI > %s%s", job_where(&job), tm);
+            break;
+        default: snprintf(t, sizeof t, "%s > %s%s", job.type == JOB_EXPRESS ? "EXPRESS" : job_name[job.type], job_where(&job), tm); break;
+        }
+        if (sub[0]) enh_text(xrgb, FW, FH, S, sub, em + 160 - enh_text_width(sub, 1) / 2, 44, 1, 0xF0E070, true);
+        bool late = job.t_left > 0 && job.t_left < 15 && fmod(job.t_left, 0.6) < 0.3;
+        enh_text(xrgb, FW, FH, S, t, em + 160 - enh_text_width(t, 1) / 2, 8, 1, late ? 0xFF6050 : 0xF0E070, true);
+        if (job.type == JOB_RACE && job.stage == 1 && job.car) {     /* the count down */
+            char cd[4];
+            snprintf(cd, sizeof cd, "%d", 3 - (int)job.t);
+            enh_text(xrgb, FW, FH, S, cd, em + 160 - enh_text_width(cd, 3) / 2, 60, 3, 0xF0E070, true);
+        }
+        double gx, gz;
+        const char *lab;
+        if (job_goal(&gx, &gz, &lab)) {
+            double dx = wraps(gx - v->cam_x4), dz = wraps(gz - v->cam_z4), d = sqrt(dx * dx + dz * dz);
+            if (d > 600) {
+                double a = atan2(dx, dz) - v->heading * A2RAD, sa = sin(a), ca = cos(a);
+                double qx = (em + 160) * S, qy = 100.0 * S, rr = 84.0 * S;
+                double tx = qx + sa * rr, ty = qy - ca * rr * 0.66, bx = qx + sa * (rr - 8 * S), by = qy - ca * (rr - 8 * S) * 0.66;
+                double ox = -ca * 6 * S, oy = -sa * 6 * S * 0.8;
+                enh_line(xrgb, em, bx + ox, by + oy, tx, ty, 2.0 * S, 0xF0E070, 0.9);
+                enh_line(xrgb, em, bx - ox, by - oy, tx, ty, 2.0 * S, 0xF0E070, 0.9);
+                char l2[24];
+                snprintf(l2, sizeof l2, "%s %dM", lab, (int)(d / 100));
+                int lx = (int)(tx / S) - enh_text_width(l2, 1) / 2, ly = (int)(ty / S) + (ca > 0 ? 6 : -12);
+                enh_text(xrgb, FW, FH, S, l2, lx, ly, 1, 0xF0E070, false);
+            }
+        }
+    }
     /* the village's name, coming in */
     if (banner_t > 0 && banner_vil >= 0 && banner_vil < nvil && !menu.open) {
         const Vil *V = &vil[banner_vil];
@@ -1109,12 +1827,16 @@ void enh_town_hud(u32 *xrgb, const EnhSnap *s, const EnhView *v, int em)
             enh_text(xrgb, FW, FH, S, it->label, x0 + 14, y, 1, tc, false);
             if (it->right[0]) {
                 bool afford = it->price <= money || it->price == 0;
-                u32 rc = it->kind == IT_INFO ? 0x9A9A9A : !afford ? 0xFF7060 : 0x90FF90;
+                u32 rc = it->kind == IT_INFO ? 0x9A9A9A : it->kind == IT_JOB || afford ? 0x90FF90 : 0xFF7060;
                 if (!strcmp(it->right, "FULL") || !strcmp(it->right, "FITTED") || !strcmp(it->right, "NONE")) rc = 0x9A9A9A;
                 enh_text(xrgb, FW, FH, S, it->right, x1 - 8 - enh_text_width(it->right, 1), y, 1, rc, false);
             }
         }
         if (menu.note_t > 0) enh_text(xrgb, FW, FH, S, menu.note, em + 160 - enh_text_width(menu.note, 1) / 2, yn, 1, menu.note_rgb, false);
+        else if (menu.sel >= 0 && menu.sel < menu.n && menu.it[menu.sel].hint[0]) {     /* the job's where and when */
+            const char *h2 = menu.it[menu.sel].hint;
+            enh_text(xrgb, FW, FH, S, h2, em + 160 - enh_text_width(h2, 1) / 2, yn, 1, 0xF0E070, false);
+        }
         const char *h = "A/SPACE BUY   B/E LEAVE";
         enh_text(xrgb, FW, FH, S, h, em + 160 - enh_text_width(h, 1) / 2, yh, 1, 0x8A8A8A, false);
     }

@@ -20,6 +20,9 @@ void weapon_freeze(int obj);
 /* the player was shot dead (enh_foes.c); race_run takes it (weapon_take_death) and loses a life */
 void weapon_player_killed(void);
 bool weapon_take_death(void);
+/* OG (TOWNS.md "Jobs"): a vehicle held where it is or let go on; the hits it took (WEAPON_CAR_HITS wreck it) */
+void weapon_hold(int obj, bool on);
+double weapon_hits(int obj);
 /* changes with every new leg and every death: the enhanced view clears its ambush then */
 u32  weapon_generation(void);
 /* changes with every death: the walker's weapons are lost then (WEAPON.md) */

@@ -346,6 +346,9 @@ int  enh_foes_stars(void);
 bool enh_foes_police_see(void);
 void enh_foes_clear_wanted(void);
 bool enh_foes_danger(double x, double z);
+bool enh_foes_gang(const EnhSnap *c, double x, double z, double y);
+int  enh_foes_gang_left(void);
+void enh_foes_hot(int stars);
 /* enh_gun.c, for the gun shop */
 void enh_gun_state(int w, bool *owned, int *rounds, int *room);
 void enh_gun_confiscate(void);

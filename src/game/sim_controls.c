@@ -262,7 +262,7 @@ static void key_radio(void)
 {
     u8 st = (u8)(DSB(DS_radio_station) + 1);
     s16 msg;
-    if (st >= 3) st = 0;
+    if (st >= 4) st = 0;                                      /* OG: a fourth station, silent (sound/api.c) */
     DSB(DS_radio_station) = st;
     if (music_for_state(st) != 0) msg = 0x22;                 /* "Change radio station" */
     else if (DSB(DS_music_off) == 1) msg = 0x28;              /* "Music must be on to hear radio" */

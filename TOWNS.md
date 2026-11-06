@@ -69,6 +69,44 @@ money a life is lost as before.
 **The vest** (body armour, 0 to 100, a blue bar over the health) takes three quarters of every hit until it is
 used up; it is lost with a life.
 
+## Jobs (og9)
+
+Made up at random, one at a time. The pub's barkeeper offers parcels, a race, a getaway or a fare (the first line of
+the pub's menu), the police station a bounty or a stolen car (the line after the fine); the line shows what it pays,
+the line under the menu the where (and how long). An offer stays until it is taken; the next visit after brings a new
+one, a new leg new offers. Goals are houses without a service in other villages, at most 40 m from a road and
+reachable by road.
+
+| Job | From | What | Time | Pay |
+|---|---|---|---|---|
+| PARCEL | pub | to a house 120 to 700 m away, on foot into the ring at its door | 40 s + 1 s per 10 m by road + 1 s per 3 m on foot | $60 + $0.30 a metre by road, at most $500 |
+| EXPRESS PARCEL | pub | the same | 30 s + 1 s per 13 m + 1 s per 4 m | 1.6 times |
+| HOT GOODS | pub | the same; taking it, the police know at once: two stars | as a parcel | 2.2 times |
+| TAXI | pub | the fare gets in with you; stop by the goal's door (within the road's distance + 25 m, slower than 5); a crash on the way and the fare jumps out | 1.15 times a parcel's (from getting in) | 1.2 times |
+| RACE | pub | a local races you to a village ahead (300 to 1300 m by road, nearer the leg's finish): get in, a rival is taken (the race's opponent within 150 m first, else a car of the traffic heading there), 3 2 1 GO; the first within 30 m of the goal's road wins (a traffic rival gets the fastest speed class; a rival shot to a wreck loses) | no rival in 45 s: off | $200 to $400 |
+| GETAWAY | pub | pick up the loot at one house (three stars at once), drop it at another; the drop takes it only with the police lost (hidden, or resprayed) | none | $500 to $900 |
+| BOUNTY | police | a gang of three at a house of another village, 200 m on, comes out within 90 m; all three down, back to the police station that gave the job: walk into its ring | none | $300 to $500 |
+| STOLEN CAR | police | at the village of the theft (within 150 m) a car of the traffic nearby drives off at the fastest speed class; two hits stop it (five wreck it: failed), the thief runs; walk (or drive) to it. More than 500 m away: it got away | none | $250 to $400 |
+
+The way by road is measured on the leg's road network: map cells with road faces, joined where the road of both
+reaches their common edge at the same place; a breadth-first search, 41 m a cell. On the first leg of Cape Cod -
+Niagara it is 1 to 3.5 times the straight distance (the road goes round the bays); the car does about 19 m/s on the
+road at full speed (measured), a parcel asks about 8 m/s on average, an express parcel about 13. The leg's finish
+(the cell with the gas station) tells which villages are ahead for a race.
+
+While a job runs, a line at the top says what and where, with the time left (red the last 15 s; a race also the
+rival's distance under it), and an arrow round the centre points to the goal with its distance ("DROP", "LOOT",
+"GANG", "POLICE", "FINISH", "STOLEN", "CAR", "THEFT"): the only arrow in the game, as the player asked for the job.
+A pale yellow ring marks the door to walk into. A job is lost when the time runs out ("TOO LATE - JOB FAILED"), when
+the player is shot dead, and with a new leg ("JOB LOST").
+
+Developer aids: `TD3_JOB=n` (1 parcel, 2 express, 3 hot goods, 4 bounty, 5 race, 6 getaway, 7 stolen car, 8 taxi:
+one at once at the start of a leg, from the nearest pub or police station), `TD3_JOB_TYPE=n` (every offer made is
+that one), `TD3_JOB_GOTO=1` (out of the car, the walker is put before the goal, once a stage; a gang's 40 m off, a
+theft's village 60 m off; the taxi and the race: the car too), `TD3_JOB_SHOOT=1` (the stolen car takes two hits, the
+gang falls, 2 s after), `TD3_JOB_TIME=s` (a parcel's time); `TD3_FOES_DEBUG=1` logs the jobs and every offer made
+(way by road, straight, on foot, time); `TD3_POS_LOG=1` the player's place and the car's speed once a second.
+
 ## Real villages (planned, `src/game/village.c`)
 
 Where a village is planned, houses are added: copies of the leg's own house models, each placed by the middle of its

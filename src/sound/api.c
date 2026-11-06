@@ -40,6 +40,10 @@ s16 music_for_state(s16 track)
         music_play(ds_far(DS_music_buf), 0, 0);
         return 0;                                      /* PORT: AX undefined in the original */
     case 5:                                            /* 1db4: race ("radio") */
+        if (track >= 3) {                              /* OG: the fourth station is silent (key_radio) */
+            music_stop(0);
+            return 1;
+        }
         if (!(DSB(DS_music_off) == 0 && DSW(DS_sfx_off) == 1 && DSB(DS_snd_on) == 1)) {
             /* effects on: only when not on the PC speaker (word DS:008F = sfx_off:DS:0090, sic) */
             if (DSB(DS_snd_on) != 1) return 0;

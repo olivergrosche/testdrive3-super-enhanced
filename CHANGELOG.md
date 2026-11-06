@@ -1,5 +1,14 @@
 # Changelog
 
+## 0.2.0-og9 (fork)
+
+- Jobs, made up at random: the pub's barkeeper has parcels (express, hot goods with the police on your tail), a race
+  against a local (the race's opponent or a car of the traffic), a getaway (lose the police before the drop) and taxi
+  fares (no crashes); the police station bounties on a gang (back to the station to be paid) and stolen cars to stop
+  and bring back. The time comes from the way by road. While one runs, a line at the top and an arrow show the way
+  (`TOWNS.md` "Jobs").
+- The radio has a fourth station: silence (the radio key goes 1, 2, 3, off, 1 ...).
+
 ## 0.2.0-og8 (fork)
 
 - Villages: the game's own houses along every leg are grouped into villages with names (Western ones on Pacific -

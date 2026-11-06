@@ -13,9 +13,11 @@ everything upstream does:
 * Civilians walking along the roads and round the buildings (`CIVS.md`).
 * Wanted levels: police chases, arrests, searches on foot, hiding; car thieves (`POLICE.md`).
 * Villages with names, a garage, gun shops, pubs and police stations; money and body armour (`TOWNS.md`).
+* Jobs made up at random: parcels, races, getaways and taxi fares from the pub, bounties and stolen cars from the
+  police station (`TOWNS.md`).
 * Start at any section: the course selection's Left / Right choose where the race begins.
 
-Everything the fork adds is marked `OG:` in the code; `CHANGELOG.md` lists it by version (`-og1` .. `-og8`). It
+Everything the fork adds is marked `OG:` in the code; `CHANGELOG.md` lists it by version (`-og1` .. `-og9`). It
 needs the original game (version 3.0) as upstream does; the game files are not included. The port, its faithful
 engine and the enhanced renderer are upstream's work. MIT, see `LICENSE`.
 
@@ -121,7 +123,10 @@ cmake --build build
 * Sections (fork og8): in the course selection (main menu, COURSE) Up / Down choose the course as before, Left /
   Right the section the race starts at (1 to 5; the picture above shows it, with its name). Both courses (Pacific -
   Yosemite, and the Road & Car disk's Cape Cod - Niagara) have five sections; the original always started at the first.
-* Villages (fork og8, `TOWNS.md`): walk into the glowing ring before a shop's door to buy (up / down choose,
+* Radio (fork og9): the radio key (M, pad d-pad) now has a fourth, silent station after the three music ones.
+* Jobs (fork og9, `TOWNS.md`): the pub's and the police station's menus offer a job; take it, follow the arrow,
+  deliver on foot into the ring at the door (or clear the gang).
+* Villages (fork og8, `TOWNS.md`): walk into the ring before a shop's door to buy (up / down choose,
   A / Space buy, B / E leave); with a wanted level drive into a garage's bay for a respray. Money top right.
 * Police (fork og7, `POLICE.md`): crimes bring one to three stars; the police chase, get out, arrest or shoot,
   and search on foot; hide out of sight long enough to lose them. A car left alone may be stolen.
