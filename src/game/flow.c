@@ -95,11 +95,13 @@ int game_main(void)
             /* ---- §4.1.1: legs x players and the results arithmetic (inline in main) ---- */
             playdisk_verify();
             DSB(DS_leg_index) = 0;
+            if (og_start_leg < DSB(DS_leg_count)) DSB(DS_leg_index) = og_start_leg;   /* OG: the section chosen */
             {   /* ENH developer aid: TD3_START_LEG=n starts the race at leg n (0-based) */
                 const char *e = SDL_getenv("TD3_START_LEG");
                 if (e && SDL_atoi(e) > 0 && SDL_atoi(e) < DSB(DS_leg_count)) DSB(DS_leg_index) = (u8)SDL_atoi(e);
             }
             last_leg_done = 0;
+            weapon_race_start();                                  /* OG (TOWNS.md): the money starts afresh */
             DSB(DS_auto_gearbox) = (s16)DSW(DS_skill_level) < 3;
             for (s16 p = 0; p < 4; p++) {
                 for (s16 i = 0; i < 0x1b; i++) DSB(DS_player_recs + p * 0x1b + i) = 0;
@@ -191,6 +193,7 @@ int game_main(void)
                     }
                     if (DSB(DS_lives) != 0) {
                         last_leg_done = DSB(DS_leg_index);
+                        weapon_leg_done();                            /* OG (TOWNS.md): the leg's prize */
                         DSB(DS_lives) = (u8)(DSB(DS_lives) + 2);
                     }
                     leg_banner_draw();

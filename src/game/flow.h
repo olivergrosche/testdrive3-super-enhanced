@@ -100,6 +100,8 @@ s16  car_next(s16 s);                             /* 01f4:3332 — §4.10 */
 s16  car_prev(s16 s);                             /* 01f4:3396 — §4.10 */
 void car_select_draw(void);                       /* 01f4:33f8 — §4.10 */
 void scene_select(void);                          /* 01f4:3636 — §4.11 */
+/* OG (README "Sections"): the section a race starts at (0-based), chosen in the scene selection with Left / Right */
+extern u8 og_start_leg;
 s16  scene_next(s16 s);                           /* 01f4:36de — §4.11 */
 s16  scene_prev(s16 s);                           /* 01f4:373e — §4.11 */
 void scene_select_draw(void);                     /* 01f4:379c — §4.11 */

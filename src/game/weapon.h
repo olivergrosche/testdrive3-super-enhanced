@@ -26,6 +26,12 @@ u32  weapon_generation(void);
 u32  weapon_deaths(void);
 /* an ambush cleared: one life more (at most 9) */
 void weapon_bonus_life(void);
+/* OG (TOWNS.md): a new race begins (the money starts afresh), a leg was finished (a prize); counters the enhanced
+ * view watches */
+void weapon_race_start(void);
+void weapon_leg_done(void);
+u32  weapon_races(void);
+u32  weapon_legs_done(void);
 
 /* ---- OG: the police (POLICE.md) ---- */
 /* the wanted level (0 .. 3 stars), kept by the enhanced view */

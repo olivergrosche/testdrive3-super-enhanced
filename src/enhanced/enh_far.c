@@ -5,6 +5,7 @@
  * own arrays. Nothing of the game's state is written. The faces are sorted farthest first by the original's key
  * rule at the snapshot's camera (per game frame, so coplanar faces do not swap between displayed frames). */
 #include "enh_internal.h"
+#include "game/village.h"
 
 #include <math.h>
 #include <stdlib.h>
@@ -280,6 +281,18 @@ void enh_far_build(EnhSnap *s)
             place((u8)f, 1, DSW(DS_obj_x + o), z, (u16)(DSW(DS_obj_y8 + o) >> 3),
                   (u8)((DSW(DS_obj_heading + o) >> 8) & 0xC0), (s8)(DSW(DS_obj_pitch + o) >> 8));
         }
+    }
+    /* OG (TOWNS.md): the planned villages' houses the game's build did not take (game/village.c), within the ring */
+    for (int vi = 0, vn = village_count(); vi < vn; vi++) {
+        const VillageHouse *h = village_house(vi);
+        if (village_emitted(vi)) continue;
+        double ex = h->px / 1024.0 - cx, ez = h->pz / 1024.0 - cz;
+        if (ex * ex + ez * ez > (double)R * R) continue;
+        u16 es = DSW(DS_objects_set + 2), set = DSW(DS_objects_set);
+        if (!es) continue;
+        u16 si = (u16)(rd16(es, (u16)(set + 2 * h->model)) + set);
+        int nf = rd8(es, si), nv = rd8(es, (u16)(si + 1));
+        if (nf && nv) emit(es, (u16)(si + (h->parked ? 8 : 4)), nf, nv, h->px, h->pz, h->py, h->rot, 0);
     }
     /* parked objects (houses, boats: 1000h set, 2000h clear) that the game draws only within its window
      * (509b, B6E0 around the car): those it did not emit this frame, within the ring */

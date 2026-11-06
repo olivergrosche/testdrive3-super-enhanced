@@ -27,12 +27,12 @@ health), `src/game/weapon.c` (the stopped car, the death, the extra life), `race
 * **Their guns (og5):** each carries a pistol (45 %), an uzi (30 %) or a shotgun (25 %), seen in his hands. Pistol:
   bursts of three as above. Uzi: bursts of seven 0.085 s apart, each a little more than half as likely to hit,
   4 to 8. Shotgun: one shot, 1.7 to 2.7 s apart, half the time at close range and nothing beyond 3750, 12 to 21 near,
-  less far off. Dead, he drops it with rounds (`WEAPON.md`).
+  less far off. Dead, he drops it with rounds (`WEAPON.md`), and his cash, $30 to $120 (og8, `TOWNS.md`).
 * **Hitting them:** a line of sight (each of the shotgun's pellets) meets a gunman before anything else (an upright
   cylinder of radius 24, 176 cm high); the damage is the weapon's (`WEAPON.md`; the pistol: 45 a body hit, three
   kill; a head hit, the top 26 cm, kills). They flinch, bleed a little and
   fall backwards. Driving into one (faster than 8, within 190 units) runs him over.
-* **Cleared:** all three down: "AMBUSH CLEARED +1 LIFE" (at most 9 lives). An ambush the player leaves 20000 units
+* **Cleared:** all three down: "AMBUSH CLEARED +1 LIFE" (at most 9 lives) and $250 (og8, `TOWNS.md`). An ambush the player leaves 20000 units
   behind (or 9000 with everyone down) is gone. A new leg or a death clears it, health back to 100.
 
 ## The figures
@@ -58,4 +58,5 @@ thump), the ricochet (a falling whine). Their volume falls with distance and the
   driving after each (for recording: `TD3 Aufnahme.bat` next to the launcher sets 8 and 40 and starts it).
 * `TD3_AMBUSH_TEST=d`: an ambush d units straight ahead (default 2200) s seconds after the race starts, also standing.
 * `TD3_FOES_DEBUG=1`: the ambushes placed and every hit on a gunman, on stderr.
-* `TD3_FOES_AUTOAIM=1`: on foot the view follows the nearest living gunman (for headless shooting tests).
+* `TD3_FOES_AUTOAIM=1`: on foot the view follows the nearest living gunman, with none the nearest officer (og8), then
+  the nearest dropped gun (for headless shooting and punching tests).

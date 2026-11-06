@@ -69,6 +69,14 @@ static bool have_prev;
 static u32 deaths_seen;
 static char pick_msg[32];
 static double pick_t = 9;
+/* OG (WEAPON.md): the bare fists, before the guns: out of the car they are up; a punch left and right in turn */
+static bool fists = true;
+static double punch_t = 9;               /* since the punch began */
+static int punch_side;                   /* 0 right, 1 left */
+static bool punch_done;                  /* its hit tested */
+#define PUNCH_REACH 140.0                /* x4 units from the eye */
+#define PUNCH_HIT   0.10                 /* s into the punch: the arm out */
+#define PUNCH_LEN   0.38                 /* s, the punch and back */
 static u32 rng = 0x2545F491u;
 
 static void glow(double cx, double cy, double r, u32 rgb, double w);
@@ -370,7 +378,7 @@ static void shoot(const EnhSnap *c, const EnhView *v)
 double enh_gun_aim(const HostFootInput *in, bool foot, double dt)
 {
     if (!foot) { aim = 0; zoom_now = hip_zoom(); return 1.0; }
-    double target = in->aim && reload_left < 0 && since_draw > 0.3 ? 1.0 : 0.0;
+    double target = in->aim && reload_left < 0 && since_draw > 0.3 && !fists ? 1.0 : 0.0;
     aim += (target - aim) * (1 - exp(-dt / 0.07));
     if (fabs(aim - target) < 0.002) aim = target;
     zoom_now = hip_zoom() + (ZOOM_ADS - hip_zoom()) * aim;
@@ -390,23 +398,37 @@ static void loadout(void)
     if (g)
         for (int i = 0; i < W_COUNT; i++) { have[i] = true; mag[i] = wdef[i].mag; reserve[i] = wdef[i].max_reserve; }
     if (g && SDL_atoi(g) >= 1 && SDL_atoi(g) <= W_COUNT) cur = SDL_atoi(g) - 1;
+    fists = !g;                                                 /* the fists first (TD3_GIVE: the gun at once) */
 }
 
 static void take_out(int w)
 {
-    if (w == cur || !have[w]) return;
+    if ((w == cur && !fists) || !have[w]) return;
+    fists = false;
     cur = w;
     since_draw = 0;                                             /* the new one comes up */
     reload_left = -1;
     slide_locked = cur == W_PISTOL && mag[cur] == 0;
 }
 
-/* the next weapon with rounds (dir +1 / -1); with none, the next one at all */
+/* the guns away, the fists up */
+static void to_fists(void)
+{
+    if (fists) return;
+    fists = true;
+    since_draw = 0;
+    reload_left = -1;
+    punch_t = 9;
+}
+
+/* the next weapon with rounds (dir +1 / -1), the fists before the first gun; with none, the next one at all */
 static void cycle_weapon(int dir)
 {
+    int at = fists ? W_COUNT : cur, n = W_COUNT + 1;            /* position W_COUNT: the fists */
     for (int pass = 0; pass < 2; pass++)
-        for (int k = 1; k < W_COUNT; k++) {
-            int w = ((cur + dir * k) % W_COUNT + W_COUNT) % W_COUNT;
+        for (int k = 1; k < n; k++) {
+            int w = ((at + dir * k) % n + n) % n;
+            if (w == W_COUNT) { to_fists(); return; }
             if (have[w] && (pass || mag[w] + reserve[w] > 0)) { take_out(w); return; }
         }
 }
@@ -428,8 +450,50 @@ bool enh_gun_pickup(int w, int rounds)
     snprintf(pick_msg, sizeof pick_msg, fresh ? "+ %s" : "%s AMMO", d->name);
     pick_t = 0;
     pcm_sfx_play(PCM_PICKUP, 0.9, 0.0);
-    if (fresh && (w > cur || mag[cur] + reserve[cur] == 0)) take_out(w);   /* a better one in the hand */
+    if (fresh && (fists || w > cur || mag[cur] + reserve[cur] == 0)) take_out(w);   /* a better one in the hand */
     return true;
+}
+
+/* TOWNS.md: what the walker carries of weapon w (for the gun shop) */
+void enh_gun_state(int w, bool *owned, int *rounds, int *room)
+{
+    if (w < 0 || w >= W_COUNT) { *owned = false; *rounds = *room = 0; return; }
+    *owned = have[w];
+    *rounds = mag[w] + reserve[w];
+    *room = have[w] ? wdef[w].max_reserve - reserve[w] : wdef[w].mag + wdef[w].max_reserve;
+}
+
+/* TOWNS.md: bailed out, the weapons taken: the start's pistol again */
+void enh_gun_confiscate(void)
+{
+    loadout();
+    fists = true;
+}
+
+/* a punch's hit, when the arm is out: the nearest person within reach along the view (a little below the eye, the
+ * face and the chest), else a wall or a car (a thud) */
+static void punch_hit(const EnhSnap *c, const EnhView *v)
+{
+    double yaw = v->heading * A2RAD, e0 = (v->cam_row - 100.0 / enh_foot_zoom()) / RAD2PX;
+    int best = -1;
+    double bt = 1e9;
+    bool bhead = false;
+    static const double tilt[3] = { 0.0, -0.18, -0.36 };          /* the face, the chest, lower */
+    for (int k = 0; k < 3; k++) {
+        double e = e0 + tilt[k], d[3] = { sin(yaw) * cos(e), sin(e), cos(yaw) * cos(e) }, t;
+        bool head = false;
+        int i = enh_foes_ray(v->cam_x4, v->cam_y, v->cam_z4, d, PUNCH_REACH, &t, &head);
+        if (i >= 0 && t < bt) { bt = t; best = i; bhead = head; }
+    }
+    if (best >= 0) {
+        enh_foes_damage(best, bhead ? 50 : 34);
+        pcm_sfx_play(PCM_PUNCH, 1.0, punch_side ? -0.2 : 0.2);
+        since_hit = 0;
+        return;
+    }
+    double d[3] = { sin(yaw) * cos(e0 - 0.18), sin(e0 - 0.18), cos(yaw) * cos(e0 - 0.18) };
+    if (enh_ray_world(c, v, v->cam_x4, v->cam_y, v->cam_z4, d, PUNCH_REACH) < PUNCH_REACH)
+        pcm_sfx_play(PCM_PUNCH, 0.45, punch_side ? -0.2 : 0.2);   /* knuckles on a wall or a car */
 }
 
 void enh_gun_frame(const EnhSnap *c, const EnhView *v, const HostFootInput *in, double dt)
@@ -440,8 +504,10 @@ void enh_gun_frame(const EnhSnap *c, const EnhView *v, const HostFootInput *in, 
     pick_t += dt;
     if (!c->foot) { was_foot = false; return; }
     const WDef *w = &wdef[cur];
-    if (!was_foot) {                                           /* just out of the car: the gun comes up */
+    if (!was_foot) {                                           /* just out of the car: the fists come up */
         was_foot = true;
+        if (!SDL_getenv("TD3_GIVE")) fists = true;
+        punch_t = 9;
         since_draw = 0;
         reload_left = -1;
         fire_prev = in->fire;
@@ -450,15 +516,29 @@ void enh_gun_frame(const EnhSnap *c, const EnhView *v, const HostFootInput *in, 
     }
     int sel, cyc;
     host_foot_weapon(&sel, &cyc);
-    if (sel >= 1 && sel <= W_COUNT) take_out(sel - 1);
+    if (sel == 1) to_fists();                                   /* 1 the fists, 2 3 4 the guns */
+    else if (sel >= 2 && sel <= W_COUNT + 1) take_out(sel - 2);
     if (cyc) cycle_weapon(cyc > 0 ? 1 : -1);
     w = &wdef[cur];
 
     since_shot += dt; since_draw += dt; since_hit += dt;
-    double rest = w->pellets > 1 ? 0.004 : w->spread;
-    spread += (rest - spread) * (1 - exp(-dt / 0.25));
     bool on_ground;
     double speed = foot_speed(&on_ground);
+    if (fists) {                                               /* a punch: on a press, once the last is nearly back */
+        punch_t += dt;
+        if (!punch_done && punch_t >= PUNCH_HIT) { punch_done = true; punch_hit(c, v); }
+        if (in->fire && !fire_prev && since_draw > 0.25 && punch_t > PUNCH_LEN * 0.8) {
+            punch_t = 0;
+            punch_done = false;
+            punch_side ^= 1;
+            pcm_sfx_play(PCM_SWISH, 0.8, punch_side ? -0.15 : 0.15);
+        }
+        fire_prev = in->fire;
+        reload_prev = in->reload;
+        goto motion;
+    }
+    double rest = w->pellets > 1 ? 0.004 : w->spread;
+    spread += (rest - spread) * (1 - exp(-dt / 0.25));
     spread = fmax(spread, rest + speed / 700.0 * 0.020);
 
     if (reload_left >= 0) {
@@ -500,6 +580,7 @@ void enh_gun_frame(const EnhSnap *c, const EnhView *v, const HostFootInput *in, 
     fire_prev = in->fire;
     reload_prev = in->reload;
 
+motion:;
     /* the hand's motion: walking bob, sway against turning */
     double a = on_ground ? fmin(speed / 320.0, 2.0) : 0;
     bob_amp += (a - bob_amp) * (1 - exp(-dt / 0.15));
@@ -553,6 +634,8 @@ static const u8 *MASK;
 static int MASK_W;
 void enh_draw_mask(const u8 *m, int w) { MASK = m; MASK_W = w; }
 static inline bool masked(int x, int y) { return MASK && !MASK[(size_t)(y / S) * MASK_W + x / S]; }
+/* TOWNS.md: the 3D view shows at frame VGA pixel (x, y) */
+bool enh_draw_mask_shows(int x, int y) { return !MASK || (x >= 0 && y >= 0 && x < MASK_W && y < 200 && MASK[(size_t)y * MASK_W + x]); }
 static u32 *OUT;
 
 /* the particles over the frame: the front target's column 0 / row 0 at frame VGA pixel (offx, offy), drawn in the
@@ -699,8 +782,35 @@ static void right_hand(double dy, double dz)
     hx_taper(-14.4 + dz, -2.8, 3.8, -14.8 + dy, -6.2 + dy, -30.0 + dz, -4.0, 6.0, -32.0 + dy, -12.0 + dy, C_SLEEVE, P_SLEEVE);
 }
 
+/* OG: a fist (its middle at the origin, the knuckles ahead), the wrist, the cuff and the sleeve back from it; mirrored
+ * for the left (m = -1: the thumb on the other side) */
+static Hex fisth[2][NHEX];
+static double hand_boost = 1.0;
+static int nfisth[2];
+#define C_SKIN_D 0xA87A5E
+#define C_SKIN_L 0xCC9C7E
+static void fist_model(int m)
+{
+    double s = m;
+    hx_box(-3.5, 3.5, -3.3, 3.2, -3.0, 3.6, C_SKIN, P_HAND);                 /* the fist */
+    for (int i = 0; i < 4; i++) {                                         /* the knuckles */
+        double x0 = -3.6 + i * 1.83;
+        hx_box(x0, x0 + 1.65, 0.4, 3.5, 3.4, 4.9, C_SKIN_L, P_HAND);
+    }
+    hx_box(-3.4, 3.4, -3.1, 0.4, 3.4, 4.4, C_SKIN_D, P_HAND);               /* the curled fingers */
+    double t0 = s > 0 ? -4.3 : 0.6, t1 = s > 0 ? -0.6 : 4.3;
+    hx_box(t0, t1, -3.6, -1.7, 0.8, 4.6, C_SKIN, P_HAND);                    /* the thumb across them */
+    hx_taper(-2.6, -3.1, 3.1, -3.0, 2.8, -9.5, -2.6, 2.6, -2.7, 2.3, C_SKIN, P_HAND);          /* the wrist */
+    hx_taper(-9.0, -3.5, 3.5, -3.4, 3.1, -11.0, -3.7, 3.7, -3.6, 3.3, C_CUFF, P_SLEEVE);       /* the cuff */
+    hx_taper(-10.9, -3.7, 3.7, -3.6, 3.3, -34.0, -5.0, 5.0, -5.4, 4.4, C_SLEEVE, P_SLEEVE);    /* the sleeve */
+}
+
 static void gun_model(void)
 {
+    if (!nfisth[0]) {
+        hex = fisth[0]; nhex = 0; fist_model(1); nfisth[0] = nhex;    /* right */
+        hex = fisth[1]; nhex = 0; fist_model(-1); nfisth[1] = nhex;   /* left */
+    }
     if (nhexw[W_PISTOL]) return;
     hex = hexw[W_PISTOL]; nhex = 0;                             /* the pistol */
     hx_box(-1.35, 1.35, 0.2, 3.5, -2.6, 16.4, C_METAL, P_SLIDE);             /* the slide */
@@ -772,13 +882,13 @@ static void rot(const Pose *ps, const double *in, double *out)
     out[0] = x + ps->x; out[1] = y + ps->y; out[2] = z + ps->z;
 }
 
-static void gun_faces(const Pose *ps, double slide, double light, double flash, double cx, double cy, double f)
+static void hex_faces(const Hex *list, int nlist, const Pose *ps, double slide, double light, double flash, double cx,
+                      double cy, double f)
 {
     static const int quads[6][4] = { { 0, 2, 6, 4 }, { 1, 5, 7, 3 }, { 0, 4, 5, 1 }, { 2, 3, 7, 6 }, { 0, 1, 3, 2 }, { 4, 6, 7, 5 } };
     const double L[3] = { -0.45, 0.75, 0.48 };                /* towards the light: above, left, ahead (the back in shade) */
-    nfaces = 0;
-    for (int b = 0; b < nhexw[cur]; b++) {
-        const Hex *h = &hexw[cur][b];
+    for (int b = 0; b < nlist; b++) {
+        const Hex *h = &list[b];
         double w[8][3], ctr[3] = { 0, 0, 0 };
         for (int i = 0; i < 8; i++) {
             double l[3] = { h->v[i][0], h->v[i][1], h->v[i][2] - (h->part == P_SLIDE ? slide : 0) };
@@ -810,7 +920,7 @@ static void gun_faces(const Pose *ps, double slide, double light, double flash, 
                     m++;
                 }
             }
-            if (m < 3) continue;
+            if (m < 3 || nfaces >= NHEX * 6) continue;
             EnhPoly *F = &faces[nfaces++];
             F->n = m;
             F->z = fc[2];
@@ -819,13 +929,19 @@ static void gun_faces(const Pose *ps, double slide, double light, double flash, 
                 F->x[k] = cx + f * out[k][0] / out[k][2];
                 F->y[k] = cy - f * out[k][1] / out[k][2];
             }
-            double br = sh * light;
+            double br = sh * light * (h->part == P_HAND ? hand_boost : 1.0);   /* the fists: the skin out of the shade */
             int r = (int)(((h->rgb >> 16) & 0xFF) * (br + flash * 0.3) + 36 * flash);   /* lit by the flash */
             int g = (int)(((h->rgb >> 8) & 0xFF) * (br + flash * 0.22) + 20 * flash);
             int bl = (int)((h->rgb & 0xFF) * (br + flash * 0.1) + 4 * flash);
             F->rgb = (u32)(r > 255 ? 255 : r) << 16 | (u32)(g > 255 ? 255 : g) << 8 | (u32)(bl > 255 ? 255 : bl);
         }
     }
+}
+
+static void gun_faces(const Pose *ps, double slide, double light, double flash, double cx, double cy, double f)
+{
+    nfaces = 0;
+    hex_faces(hexw[cur], nhexw[cur], ps, slide, light, flash, cx, cy, f);
 }
 
 static int cmp_face(const void *a, const void *b)
@@ -972,6 +1088,15 @@ static const struct { char c; u8 r[7]; } font[] = {
     { 'U', { 0x11, 0x11, 0x11, 0x11, 0x11, 0x11, 0x0E } }, { 'V', { 0x11, 0x11, 0x11, 0x11, 0x11, 0x0A, 0x04 } },
     { 'W', { 0x11, 0x11, 0x11, 0x15, 0x15, 0x15, 0x0A } }, { '!', { 0x04, 0x04, 0x04, 0x04, 0x04, 0x00, 0x04 } },
     { '+', { 0x00, 0x04, 0x04, 0x1F, 0x04, 0x04, 0x00 } }, { '*', { 0x04, 0x04, 0x1F, 0x0E, 0x0E, 0x1B, 0x11 } }, { 'Z', { 0x1F, 0x01, 0x02, 0x04, 0x08, 0x10, 0x1F } },
+    /* TOWNS.md: the shops' signs and menus */
+    { 'J', { 0x07, 0x02, 0x02, 0x02, 0x02, 0x12, 0x0C } }, { 'Q', { 0x0E, 0x11, 0x11, 0x11, 0x15, 0x12, 0x0D } },
+    { 'X', { 0x11, 0x11, 0x0A, 0x04, 0x0A, 0x11, 0x11 } }, { '$', { 0x04, 0x0F, 0x14, 0x0E, 0x05, 0x1E, 0x04 } },
+    { '-', { 0x00, 0x00, 0x00, 0x1F, 0x00, 0x00, 0x00 } }, { '.', { 0x00, 0x00, 0x00, 0x00, 0x00, 0x0C, 0x0C } },
+    { '\'', { 0x04, 0x04, 0x08, 0x00, 0x00, 0x00, 0x00 } }, { '(', { 0x02, 0x04, 0x08, 0x08, 0x08, 0x04, 0x02 } },
+    { ')', { 0x08, 0x04, 0x02, 0x02, 0x02, 0x04, 0x08 } }, { '?', { 0x0E, 0x11, 0x01, 0x02, 0x04, 0x00, 0x04 } },
+    { ',', { 0x00, 0x00, 0x00, 0x00, 0x0C, 0x04, 0x08 } }, { '>', { 0x08, 0x04, 0x02, 0x01, 0x02, 0x04, 0x08 } },
+    { '<', { 0x02, 0x04, 0x08, 0x10, 0x08, 0x04, 0x02 } }, { '%', { 0x18, 0x19, 0x02, 0x04, 0x08, 0x13, 0x03 } },
+    { '=', { 0x00, 0x00, 0x1F, 0x00, 0x1F, 0x00, 0x00 } },
 };
 
 int enh_text_width(const char *s, int scale) { return ((int)strlen(s) * 6 - 1) * scale; }
@@ -1007,6 +1132,25 @@ void enh_gun_draw(u32 *xrgb, const EnhSnap *s, int em)
     gun_model();
     const WDef *w = &wdef[cur];
     double zoom = enh_foot_zoom(), f = RAD2PX * zoom * S, cx = (em + 160) * S, cy = 100.0 * S;
+    if (fists) {                                               /* unarmed: nothing in view; a punch comes up from below */
+        if (punch_t < PUNCH_LEN) {
+            double light = s->day ? 1.0 : 0.5, m = punch_side ? -1 : 1;   /* 0 right, 1 left */
+            double t = punch_t, e = t < PUNCH_HIT ? t / PUNCH_HIT : t < PUNCH_HIT + 0.05 ? 1 : 1 - (t - PUNCH_HIT - 0.05) / (PUNCH_LEN - PUNCH_HIT - 0.05);
+            e = e < 0 ? 0 : e > 1 ? 1 : e;
+            e = e * e * (3 - 2 * e);
+            Pose ps = { 13.0 * m, -30.0, 26.0, -0.22 * m, 0.95, -1.05 * m };   /* below the view, upright */
+            ps.x += 1.4 * sway_x * (1 - e);
+            ps.x += (3.0 * m - ps.x) * e; ps.y += (-5.5 - ps.y) * e; ps.z += (52.0 - ps.z) * e;   /* out at the middle */
+            ps.yaw += (-0.04 * m - ps.yaw) * e; ps.pitch += (0.38 - ps.pitch) * e; ps.roll += (-0.15 * m - ps.roll) * e;   /* turned flat */
+            nfaces = 0;
+            hand_boost = 1.55;
+            hex_faces(fisth[punch_side], nfisth[punch_side], &ps, 0, light, 0, cx, cy, f);
+            hand_boost = 1.0;
+            raster_faces();
+        }
+        if (pick_t < 1.8) enh_text(xrgb, FW, FH, S, pick_msg, em + 160 - enh_text_width(pick_msg, 1) / 2, 150, 1, 0x90FF90, true);
+        return;
+    }
     /* the pose: from the hip to the sights, with the recoil, the reload, the drawing, walking and turning */
     double hipw = 1 - aim;
     Pose ps = { w->hip.x * hipw, w->hip.y * hipw + w->ads_y * aim, w->hip.z * hipw + w->ads_z * aim,

@@ -1,5 +1,27 @@
 # Changelog
 
+## 0.2.0-og8 (fork)
+
+- Villages: the game's own houses along every leg are grouped into villages with names (Western ones on Pacific -
+  Yosemite, New England ones on Cape Cod - Niagara), shown when the player comes in. Some houses hold a service,
+  with a sign over the door and a ring painted on the ground before it: a garage (car armour; driven into its bay
+  with a wanted level, a respray loses the police), a gun shop (rounds, the uzi, the shotgun, body armour), a pub
+  (beer, food: health) and a police station (pay the fine). Walk into the ring to shop. Nothing else points to them:
+  no arrows, no glow, they are found by looking (`TOWNS.md`).
+- A real village: PILGRIM COVE by the start of Cape Cod - Niagara, nine buildings of the leg's own models added on
+  the level middle of the main street (gun shop, pub, garage, houses, a farm; the police beyond the bend), solid to
+  the car and the walker. Houses go on level ground only (`src/game/village.c`, `TOWNS.md` "Real villages").
+- Money: gunmen drop cash, a cleared ambush and a finished leg pay, civilians drop wallets; tickets, the hospital,
+  the shops and the bail cost. Busted with enough money, the bail is paid instead of a life (the weapons are
+  taken). Body armour takes most of a hit. The money shows small, top right (`TOWNS.md`).
+- Fists: out of the car the walker is unarmed (nothing in view); changing the weapon brings out the guns. RT
+  punches, a fist out from below, left and right; three punches drop a gunman, an officer or a passer-by
+  (`WEAPON.md`). 1 is the fists now, 2 3 4 the guns.
+- Sections: the course selection's Left / Right choose the section the race starts at (its picture and name show).
+- On foot the map's edge holds: walking off it came out at the far side of the map (its coordinates wrap) with no
+  way back to the car (`FOOT.md`).
+- No glint on dropped guns and cash any more.
+
 ## 0.2.0-og7 (fork)
 
 - Wanted levels: crimes someone sees (shooting near the police, hurting civilians, wrecking cars, attacking the

@@ -61,3 +61,10 @@ you out at a standstill (`car_speed` ≤ 2) on the ground, in a race in the cock
   frame also the faces within 400 units.
 * Headless: `TD3_PAD="10:y=1,11.2:y=0,12:ly=-1,16:ly=0"` (after `TD3_KEYS="4:1c,7:1c"`) gets out at the start
   and walks for 4 s.
+
+## The map's edge (og8)
+
+A leg's map is 32 x 16 cells (131072 x 65536 x4 units); its coordinates wrap at the edges (z at exactly the
+map's height), which no car reaches. A walker who went off the edge came out at the far side of the map, with the
+car hundreds of metres away and no way back. The walker is now kept 1024 units (about 10 m) inside the edges: the
+edge holds like a wall (`keep_on_map` in `foot.c`; also where the walker gets out and where a stolen car is left).

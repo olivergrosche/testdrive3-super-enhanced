@@ -2,6 +2,7 @@
  * car select and course select. Segment 01f4. */
 #include "game/game.h"
 #include "enhanced/enhanced.h"
+#include <stdio.h>
 
 /* PORT: the main menu renders its 3D preview unpaced in the original; game_flow.md §7 recommends the race
  * loop's rule with the original constant: at least 5 timer ticks per loop (~4.4 s per turn of the car). */
@@ -354,7 +355,9 @@ void car_select_draw(void)
     flow_page(0);
 }
 
-/* 01f4:3636 scene_select — game_flow.md §4.11 */
+u8 og_start_leg;
+
+/* 01f4:3636 scene_select — game_flow.md §4.11. OG: Left / Right choose the section the race starts at */
 void scene_select(void)
 {
     s16 sel, orig, done = 0;
@@ -369,11 +372,18 @@ void scene_select(void)
         bios_wait_ticks(4);
         key_poll(&k);
         if (k != 0) {
+            bool redraw = false;
             if (k == 0x0d) done = 1;
             else if (k == 0x92) sel = scene_prev(sel);
             else if (k == 0x98) sel = scene_next(sel);
+            else if (k == 0x94 && og_start_leg > 0) { og_start_leg--; redraw = true; }          /* OG: Left */
+            else if (k == 0x96 && og_start_leg + 1 < DSB(DS_leg_count)) { og_start_leg++; redraw = true; }   /* OG: Right */
             if (sel != (s16)DSW(DS_scene_index)) {
                 DSW(DS_scene_index) = (u16)sel;
+                og_start_leg = 0;                              /* OG: another scene starts at its first section */
+                redraw = true;
+            }
+            if (redraw) {
                 scene_select_draw();
                 DSB(DS_kbd_key) = 0;
             }
@@ -413,6 +423,8 @@ s16 scene_prev(s16 s)
 void scene_select_draw(void)
 {
     u16 last = (u16)(DSB(DS_leg_count) * 6);                   /* entry of leg leg_count-1 at 0B14/16/18 + 6n */
+    if (og_start_leg >= DSB(DS_leg_count)) og_start_leg = 0;
+    u16 first = (u16)((og_start_leg + 1) * 6);                 /* OG: the start section's entry (the first leg: 6) */
 
     DSB(DS_colour_offset) = 0;
     flow_page(1);
@@ -429,18 +441,37 @@ void scene_select_draw(void)
     gfx_set_colour(0);
     gfx_fill_rect(0, 0x13f, 0, 199);
     pic_draw(DS_sprite_set, DSW(DS_scene_pic_pairs), 0x140, 0, 0x20, 0);   /* banner */
-    /* first leg: "<scene><d>.COL" palette at 16.., .BLZ, .ALZ */
+    /* first leg: "<scene><d>.COL" palette at 16.., .BLZ, .ALZ (OG: the start section's) */
     flow_strcpy(DS_path_scene + 10, 0x1080);                   /* ".COL" */
-    DSB(DS_path_scene + 9) = DSB(0x0B1E);
+    DSB(DS_path_scene + 9) = DSB((u16)(first + 0x0B18));
     pal_load(DS_path_scene);
     flow_strcpy(DS_path_scene + 11, 0x1085);                   /* "BLZ" */
     flow_load_decode(DS_path_scene);
-    pic_draw(DS_sprite_set, DSW(0x0B1C), 0x140, 0, 0x6b, 0);
+    pic_draw(DS_sprite_set, DSW((u16)(first + 0x0B16)), 0x140, 0, 0x6b, 0);
     DSB(DS_path_scene + 11) = 'A';
     flow_load_decode(DS_path_scene);
-    pic_draw(DS_sprite_set, DSW(0x0B1A), 0x140, 0, 0x58, 1);
+    pic_draw(DS_sprite_set, DSW((u16)(first + 0x0B14)), 0x140, 0, 0x58, 1);
     gfx_set_colour(8);
     gfx_frame(0, 0x13f, 0x26, 0x6b);
+    {   /* OG: which section, of how many, its name (the leg names: 48 bytes each, the name first) */
+        char line[48];
+        int n = 0;
+        for (int i = 0; i < 13; i++) {
+            char ch = (char)DSB((u16)(DS_scene_leg_names + og_start_leg * 0x30 + i));
+            if (ch < 0x20 || ch > 0x7e) break;
+            line[n++] = ch;
+        }
+        while (n > 0 && line[n - 1] == ' ') n--;
+        line[n] = 0;
+        char out[64];
+        snprintf(out, sizeof out, "Section %d/%d: %s   (Left/Right)", og_start_leg + 1, DSB(DS_leg_count), line);
+        u8 tr = DSB(DS_text_transparent);
+        DSB(DS_text_transparent) = 0;
+        text_set_colours(15, 0);
+        text_goto(0x29, 1);
+        for (const char *c = out; *c; c++) text_draw_char((const u8 *)c);
+        DSB(DS_text_transparent) = tr;
+    }
     /* last leg: palette at 144.. */
     DSB(DS_colour_offset) = 0x80;
     flow_strcpy(DS_path_scene + 10, 0x1089);                   /* ".COL" */

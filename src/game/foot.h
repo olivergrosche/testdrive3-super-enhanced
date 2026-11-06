@@ -28,6 +28,8 @@ double foot_speed(bool *on_ground);
 bool foot_car_pos(double *x4, double *z4, double *y, u16 *heading);
 /* POLICE.md: the parked car is somewhere else now (a thief drove it there) */
 void foot_move_car(double x4, double z4, double y, u16 heading);
+/* developer aid (TOWNS.md TD3_TOWN_GOTO): the walker is put at (x4, z4), feet at height y */
+void foot_teleport(double x4, double z4, double feet);
 /* developer aid: turns the walker's view (heading u16 units, look rows) */
 void foot_set_view(double yaw, double look_rows);
 /* the walker is near enough to the car to get in (for the prompt) */

@@ -254,6 +254,98 @@ static void make_clicks(int id, const double (*c)[4], int nc, double len, double
     free(x);
 }
 
+/* TOWNS.md: the till: the drawer's clunk, then a bell (two partials, the second inharmonic) */
+static void make_cash(void)
+{
+    int n = (int)(0.9 * RATE);
+    double *x = calloc((size_t)n, sizeof *x);
+    if (!x) return;
+    click(x, n, 0.0, 600, 0.02, 0.8);
+    click(x, n, 0.012, 1900, 0.008, 0.5);
+    for (int i = (int)(0.09 * RATE); i < n; i++) {
+        double t = i / RATE - 0.09;
+        x[i] += 0.55 * sin(2 * M_PI * 2093 * t) * exp(-t / 0.22) + 0.30 * sin(2 * M_PI * 5370 * t) * exp(-t / 0.09) +
+                0.20 * sin(2 * M_PI * 3140 * t) * exp(-t / 0.15);
+    }
+    finish(PCM_CASH, x, n, 14000);
+    free(x);
+}
+
+/* the spray gun: bursts of hiss (high-passed noise), the last one long */
+static void make_spray(void)
+{
+    int n = (int)(2.2 * RATE);
+    double *x = calloc((size_t)n, sizeof *x), lp = 0, prev = 0;
+    if (!x) return;
+    static const double burst[][2] = { { 0.0, 0.35 }, { 0.5, 0.35 }, { 1.0, 1.1 } };
+    for (int i = 0; i < n; i++) {
+        double t = i / RATE, env = 0;
+        for (int b = 0; b < 3; b++) {
+            double u = t - burst[b][0];
+            if (u < 0 || u > burst[b][1]) continue;
+            env += fmin(1.0, u / 0.03) * fmin(1.0, (burst[b][1] - u) / 0.06);
+        }
+        double w = noise();
+        lp += (w - lp) * 0.35;
+        double hp = lp - prev;                                     /* a hiss, not a roar */
+        prev = lp;
+        x[i] = hp * env;
+    }
+    finish(PCM_SPRAY, x, n, 9000);
+    free(x);
+}
+
+/* a fist through the air: noise through a band that rises and falls, swelling and fading */
+static void make_swish(void)
+{
+    int n = (int)(0.20 * RATE);
+    double *x = calloc((size_t)n, sizeof *x), lp = 0, lp2 = 0, prev = 0;
+    if (!x) return;
+    for (int i = 0; i < n; i++) {
+        double t = i / RATE, u = t / 0.20;
+        double env = sin(M_PI * pow(u, 0.7)), fc = 700 + 2600 * sin(M_PI * u);
+        double a = 1 - exp(-2 * M_PI * fc / RATE);
+        lp += (noise() - lp) * a;
+        lp2 += (lp - lp2) * a;
+        double bp = lp2 - prev;                                    /* the band: low-passed, then its change */
+        prev = lp2;
+        x[i] = bp * env * env;
+    }
+    finish(PCM_SWISH, x, n, 7000);
+    free(x);
+}
+
+/* a fist landing: a dull low thump with a slap on top */
+static void make_punch(void)
+{
+    int n = (int)(0.22 * RATE);
+    double *x = calloc((size_t)n, sizeof *x), lp = 0, ph = 0;
+    if (!x) return;
+    for (int i = 0; i < n; i++) {
+        double t = i / RATE, f = 55 + 70 * exp(-t / 0.03);
+        ph += 2 * M_PI * f / RATE;
+        lp += (noise() - lp) * 0.25;
+        x[i] = 0.9 * sin(ph) * exp(-t / 0.06) + 0.7 * lp * exp(-t / 0.012) + 0.35 * noise() * exp(-t / 0.004);
+    }
+    finish(PCM_PUNCH, x, n, 16000);
+    free(x);
+}
+
+/* no: a short low buzz, twice */
+static void make_deny(void)
+{
+    int n = (int)(0.32 * RATE);
+    double *x = calloc((size_t)n, sizeof *x);
+    if (!x) return;
+    for (int i = 0; i < n; i++) {
+        double t = i / RATE, on = (t < 0.12 || (t > 0.17 && t < 0.29)) ? 1 : 0;
+        double s = sin(2 * M_PI * 150 * t), sq = s > 0 ? 1 : -1;
+        x[i] = on * (0.6 * sq + 0.4 * sin(2 * M_PI * 300 * t));
+    }
+    finish(PCM_DENY, x, n, 6000);
+    free(x);
+}
+
 const s16 *pcm_sfx(int id, int *n)
 {
     if (id < 0 || id >= PCM_COUNT) { *n = 0; return NULL; }
@@ -286,6 +378,16 @@ const s16 *pcm_sfx(int id, int *n)
         case PCM_PICKUP: {
             static const double c[][4] = { { 0.0, 1800, 0.012, 1.0 }, { 0.07, 2700, 0.012, 1.0 }, { 0.075, 700, 0.03, 0.5 } };
             make_clicks(PCM_PICKUP, c, 3, 0.25, 8000);
+            break;
+        }
+        case PCM_CASH: make_cash(); break;
+        case PCM_SWISH: make_swish(); break;
+        case PCM_PUNCH: make_punch(); break;
+        case PCM_SPRAY: make_spray(); break;
+        case PCM_DENY: make_deny(); break;
+        case PCM_TICK: {
+            static const double c[][4] = { { 0.0, 3200, 0.004, 1.0 } };
+            make_clicks(PCM_TICK, c, 1, 0.05, 5000);
             break;
         }
         default: break;

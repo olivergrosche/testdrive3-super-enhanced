@@ -6,6 +6,7 @@
  * All state lives in mem[] at the original DGROUP addresses; vertex arguments are byte offsets (2v). */
 #define RENDER3D_INTERNAL
 #include "game/game.h"
+#include "game/village.h"
 #include "enhanced/enhanced.h"
 
 /* sar by CL: the count is masked to 5 bits (286+); counts 16..31 fill with the sign */
@@ -54,6 +55,7 @@ void world_build_visible(void)
     DSB(DS_faces_resort) = 1;
     obj_ranges_clear();
     enh_world_begin();                                    /* ENH: the far ring skips the cells built here */
+    village_build_begin();                                /* OG (TOWNS.md) */
     DSW(DS_face_count) = 0;
     DSW(DS_vert_count) = 0;
     DSB(DS_sprite_children) = 0;
@@ -114,6 +116,7 @@ void world_build_visible(void)
             DSW(DS_cur_obj_slot1) = (u16)(o + 2);
             model_place((u8)f, 1);
         }
+        village_cell(ch_x, cz);                           /* OG (TOWNS.md): the planned villages' houses */
     } while (--n);
     DSW(DS_static_vert_end) = DSW(DS_vert_count);
     DSW(DS_static_face_end) = DSW(DS_face_count);

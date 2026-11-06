@@ -95,6 +95,12 @@ void host_foot_mouse(double *dx, double *dy);
 /* OG (WEAPON.md): the weapon asked for since the last call: *select 1..3 (keys 1 2 3; 0 none), *cycle steps
  * (pad RB / d-pad right +1, d-pad left -1, key Q +1, the mouse wheel) */
 void host_foot_weapon(int *select, int *cycle);
+/* OG (TOWNS.md): a shop's menu on foot. While it is on, the walking controls rest (host_foot_input gives nothing)
+ * and the menu's presses come here: up (W, Up, d-pad, stick), down, OK (Space, Enter, pad A), back (E, Backspace,
+ * Esc, pad B / Y). host_menu_input returns (and clears) the presses since the last call. */
+enum { HOST_MENU_UP = 1, HOST_MENU_DOWN = 2, HOST_MENU_OK = 4, HOST_MENU_BACK = 8 };
+void host_menu(bool on);
+int  host_menu_input(void);
 
 /* ---- OG: sampled sounds (WEAPON.md): mono 16-bit at HOST_AUDIO_RATE, mixed over the OPL2 and the speaker. The
  * samples must stay valid while they play. vol: 0 .. 1; pan: -1 (left) .. 1 (right). */

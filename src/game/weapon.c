@@ -48,6 +48,12 @@ bool weapon_take_death(void)
 u32 weapon_generation(void) { return generation; }
 u32 weapon_deaths(void) { return deaths; }
 
+static u32 races, legs_done;
+void weapon_race_start(void) { races++; }
+void weapon_leg_done(void) { legs_done++; }
+u32 weapon_races(void) { return races; }
+u32 weapon_legs_done(void) { return legs_done; }
+
 void weapon_set_wanted(int stars) { wanted = stars < 0 ? 0 : stars > 3 ? 3 : stars; }
 int  weapon_wanted(void) { return wanted; }
 

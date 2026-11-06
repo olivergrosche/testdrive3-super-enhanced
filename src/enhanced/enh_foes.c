@@ -96,6 +96,7 @@ static struct {
     bool seen, arrived;                 /* arrived: the police got near the last place (the search can be lost) */
 } wnt;
 static struct { int state, civ; double away_t, t, v, sx, sz, sy; u16 heading; bool done; } thief;
+static bool seen_now;                   /* TOWNS.md: the police see the player (this frame's checks) */
 static double ppx, ppy, ppz;            /* the player, this frame */
 #define NCIVMODE_THIEF 4
 static void step_to(const EnhSnap *c, const EnhView *v, double *x, double *z, double *y, double *yaw, double want, double sp,
@@ -103,7 +104,7 @@ static void step_to(const EnhSnap *c, const EnhView *v, double *x, double *z, do
 
 /* WEAPON.md: what the dead leave: their gun and its rounds, lying where they fell */
 #define NPICK 8
-typedef struct { bool on; double x, z, y, yaw; int wtype, rounds; double t; } Pick;
+typedef struct { bool on; double x, z, y, yaw; int wtype, rounds; double t; } Pick;   /* wtype 3: cash, rounds dollars */
 static Pick pick[NPICK];
 
 static void drop(const Foe *f)
@@ -118,6 +119,33 @@ static void drop(const Foe *f)
         k->wtype = f->wtype;
         k->rounds = lo[f->wtype] + (int)((hi[f->wtype] - lo[f->wtype] + 1) * ((double)(rand() & 0x7FFF) / 32768.0));
         k->t = 0;
+        break;
+    }
+    for (int i = 0; i < NPICK; i++) {                                   /* TOWNS.md: and his cash */
+        if (pick[i].on) continue;
+        Pick *k = &pick[i];
+        k->on = true;
+        k->x = f->x + cos(f->yaw) * 45; k->z = f->z - sin(f->yaw) * 45; k->y = f->y;
+        k->yaw = f->yaw - 0.4;
+        k->wtype = 3;
+        k->rounds = 30 + 10 * (rand() % 10);
+        k->t = 0;
+        return;
+    }
+}
+
+/* TOWNS.md: a wallet (a civilian down, now and then) */
+static void cash_drop(double x, double z, double y, int dollars)
+{
+    for (int i = 0; i < NPICK; i++) {
+        if (pick[i].on) continue;
+        Pick *k = &pick[i];
+        memset(k, 0, sizeof *k);
+        k->on = true;
+        k->x = x; k->z = z; k->y = y;
+        k->yaw = (rand() & 0xFFF) / 4096.0 * 6.28;
+        k->wtype = 3;
+        k->rounds = dollars;
         return;
     }
 }
@@ -131,7 +159,9 @@ static struct {
 } amb = { .wait = -1, .car = -1 };
 
 static double health = 100, since_hurt = 9, hurt_amount, hurt_bear;
+static double armour;                   /* TOWNS.md: the body armour (0 .. 100), takes most of a hit */
 static bool dead_sent;
+static u32 armour_deaths;
 static u32 gen_seen;
 static u16 last_fc;
 static double still_t;
@@ -273,7 +303,12 @@ static void hurt(double amount, double from_x, double from_z, const EnhSnap *c)
 {
     double px, py, pz;
     player_pos(c, &px, &py, &pz);
-    if (!foot_active()) amount *= 0.35;                                 /* the car's body and glass */
+    if (!foot_active()) amount *= enh_town_car_armour() ? 0.15 : 0.35;  /* the car's body and glass (TOWNS.md: plated) */
+    if (armour > 0) {                                                   /* TOWNS.md: the vest */
+        double a = fmin(armour, amount * 0.75);
+        armour -= a;
+        amount -= a;
+    }
     health -= amount;
     since_hurt = 0;
     hurt_amount = fmin(1.0, hurt_amount + amount / 25.0);
@@ -515,6 +550,7 @@ static void civs_update(const EnhSnap *c, const EnhView *v, double dt, double px
             k->hp = 0; k->fall_t = 0; k->hit_t = 0;
             k->yaw = atan2(dx, dz);
             enh_police_crime(2);                                         /* POLICE.md */
+            if (frand() < 0.5) cash_drop(k->x + dx / d * 120, k->z + dz / d * 120, k->y, 5 + 5 * (int)(frand() * 8));
             enh_part_blood(k->x, k->y + 30, k->z, dx / d, dz / d);
             pcm_sfx_play(PCM_FLESH, 1.0, 0);
             pcm_sfx_play(PCM_HIT_METAL, 0.6, 0);
@@ -716,6 +752,7 @@ static void police_update(const EnhSnap *c, const EnhView *v, double dt, double 
         }
     }
     seen = seen || wnt.seen;
+    seen_now = seen;
     if (wnt.stars > 0) {
         wnt.since += dt;
         if (!wnt.arrived) {                                             /* the police on the scene yet? */
@@ -876,6 +913,13 @@ static void police_update(const EnhSnap *c, const EnhView *v, double dt, double 
         wnt.busted_t += dt;
         if (wnt.busted_t > 1.2 && wnt.msg != 3) { wnt.msg = 3; wnt.msg_t = 4; }   /* BUSTED!, then the life goes */
         if (wnt.busted_t > 2.2 && !dead_sent) {
+            if (enh_money_pay(ENH_BAIL, "BAIL")) {                       /* TOWNS.md: bailed out, the guns taken */
+                enh_gun_confiscate();
+                police_clear(0);
+                wnt.msg = 5; wnt.msg_t = 4;
+                wnt.busted_t = 0;
+                return;
+            }
             dead_sent = true;
             weapon_player_killed();
         }
@@ -998,6 +1042,43 @@ static void civs_heard(double x, double z)
     }
 }
 
+/* WEAPON.md: the dropped guns, walked or driven over; TOWNS.md: the cash */
+static void picks_update(double dt, double px, double py, double pz)
+{
+    for (int i = 0; i < NPICK; i++) {
+        Pick *k = &pick[i];
+        if (!k->on) continue;
+        k->t += dt;
+        double dx = wraps(px - k->x), dz = wraps(pz - k->z), reach = foot_active() ? 95 : 190;
+        double feet = foot_active() ? py - 70 : py - 46;
+        if (dx * dx + dz * dz > 20000.0 * 20000.0) { k->on = false; continue; }   /* left behind */
+        if (dx * dx + dz * dz >= reach * reach || fabs(feet - k->y) >= 60) continue;
+        if (k->wtype == 3) { enh_money_add(k->rounds, "CASH"); k->on = false; }
+        else if (enh_gun_pickup(k->wtype, k->rounds)) k->on = false;
+    }
+}
+
+/* TOWNS.md: for the shops */
+double enh_foes_health(void) { return health; }
+double enh_foes_armour(void) { return armour; }
+void enh_foes_heal(double hp) { if (health > 0) health = fmin(100, health + hp); }
+void enh_foes_add_armour(double a) { armour = fmin(100, armour + a); }
+int  enh_foes_stars(void) { return wnt.stars; }
+bool enh_foes_police_see(void) { return wnt.stars > 0 && seen_now; }
+void enh_foes_clear_wanted(void) { if (wnt.stars > 0) police_clear(2); }
+/* someone hostile at hand (a gunman on the alert within 60 m, an officer who sees the player): no shopping */
+bool enh_foes_danger(double x, double z)
+{
+    for (int i = 0; i < NFOE; i++) {
+        if (!foe[i].on || foe[i].hp <= 0 || !foe[i].alert) continue;
+        double dx = wraps(foe[i].x - x), dz = wraps(foe[i].z - z);
+        if (dx * dx + dz * dz < 6000.0 * 6000.0) return true;
+    }
+    for (int i = 0; i < NCOP; i++)
+        if (cop[i].on && cop[i].hp > 0 && cop[i].see) return true;
+    return false;
+}
+
 void enh_foes_frame(const EnhSnap *c, const EnhView *v, double dt)
 {
     if (dt < 0 || dt > 0.25) dt = 0.25;
@@ -1014,6 +1095,7 @@ void enh_foes_frame(const EnhSnap *c, const EnhView *v, double dt)
         memset(&thief, 0, sizeof thief);                                 /* the car is the game's again */
         weapon_set_wanted(0);
         health = 100;
+        if (weapon_deaths() != armour_deaths) { armour_deaths = weapon_deaths(); armour = 0; }   /* TOWNS.md: shot dead: the vest is gone */
         dead_sent = false;
         amb.wait = env_num("TD3_AMBUSH", 45 + 30 * frand());
     }
@@ -1034,6 +1116,8 @@ void enh_foes_frame(const EnhSnap *c, const EnhView *v, double dt)
     civs_update(c, v, dt, px, py, pz);                                   /* CIVS.md */
     police_update(c, v, dt, px, py, pz);                                 /* POLICE.md */
     thief_update(c, dt, px, pz);
+    picks_update(dt, px, py, pz);
+    enh_town_frame(c, v, dt);                                            /* TOWNS.md */
 
     if (!amb.on) {
         bool test = SDL_getenv("TD3_AMBUSH_TEST") != NULL;
@@ -1057,16 +1141,9 @@ void enh_foes_frame(const EnhSnap *c, const EnhView *v, double dt)
         amb.cleared = true;
         amb.msg = 2; amb.msg_t = 3.5;
         weapon_bonus_life();
+        enh_money_add(250, "AMBUSH CLEARED");                           /* TOWNS.md */
     }
 
-    for (int i = 0; i < NPICK; i++) {                                   /* WEAPON.md: the dropped guns */
-        Pick *k = &pick[i];
-        if (!k->on) continue;
-        k->t += dt;
-        double dx = wraps(px - k->x), dz = wraps(pz - k->z), reach = foot_active() ? 95 : 190;
-        double feet = foot_active() ? py - 70 : py - 46;
-        if (dx * dx + dz * dz < reach * reach && fabs(feet - k->y) < 60 && enh_gun_pickup(k->wtype, k->rounds)) k->on = false;
-    }
     double heading = v->heading * A2RAD;
     for (int i = 0; i < NFOE; i++) {
         Foe *f = &foe[i];
@@ -1207,6 +1284,19 @@ bool enh_foes_aim(double ex, double ey, double ez, double *yaw, double *look)
         double dx = wraps(foe[i].x - ex), dz = wraps(foe[i].z - ez), d = dx * dx + dz * dz;
         if (d < bd) { bd = d; best = i; }
     }
+    if (best < 0) {                                                     /* no gunmen: the nearest officer up */
+        for (int i = 0; i < NCOP; i++) {
+            if (!cop[i].on || cop[i].hp <= 0) continue;
+            double dx = wraps(cop[i].x - ex), dz = wraps(cop[i].z - ez), d = dx * dx + dz * dz;
+            if (d < bd) { bd = d; best = i; }
+        }
+        if (best >= 0) {
+            double dx = wraps(cop[best].x - ex), dz = wraps(cop[best].z - ez), dy = cop[best].y + 120 / YCM - ey;
+            *yaw = atan2(dx, dz) / A2RAD;
+            *look = atan2(dy, sqrt(dx * dx + dz * dz)) * RAD2PX;
+            return true;
+        }
+    }
     if (best < 0) {                                                     /* all down: the nearest dropped gun */
         for (int i = 0; i < NPICK; i++) {
             if (!pick[i].on) continue;
@@ -1245,7 +1335,12 @@ int enh_foes_damage(int i, int dmg)
         k->hp -= dmg;
         k->hit_t = 0;
         civs_heard(k->x, k->z);
-        if (k->hp <= 0) { k->fall_t = 0; enh_police_crime(2); return 2; }
+        if (k->hp <= 0) {
+            k->fall_t = 0;
+            enh_police_crime(2);
+            if (frand() < 0.5) cash_drop(k->x + sin(k->yaw) * 50, k->z + cos(k->yaw) * 50, k->y, 5 + 5 * (int)(frand() * 8));   /* TOWNS.md */
+            return 2;
+        }
         enh_police_crime(1);
         civ_flee(k, k->x - sin(k->yaw) * 100, k->z - cos(k->yaw) * 100, 9, false);
         return 1;
@@ -1527,6 +1622,12 @@ static void pickup_model(const Pick *k, double cam_x, double cam_y, double cam_z
     if (dist > DRAW_RANGE) return;
     Frame fr = { cam_x + dx, k->y, cam_z + dz, cos(k->yaw), sin(k->yaw), 0, 0, 0, 1 };
     double light = night ? 0.5 : 1.0, fog = haze_k * fmin(1.0, fmax(0.0, (dist - 2000) / 10000.0));
+    if (k->wtype == 3) {                                                 /* TOWNS.md: a bundle of notes */
+        double a[3] = { 0, 1.5, -8 }, b[3] = { 0, 1.5, 8 }, c0[3] = { 0, 1.5, -1.5 }, c1[3] = { 0, 1.5, 1.5 };
+        limb(&fr, a, b, 3.6, 1.6, 3.6, 1.6, 0x4E9A4A, cam_x, cam_y, cam_z, light, fog);
+        limb(&fr, c0, c1, 3.8, 1.8, 3.8, 1.8, 0xD8D0B0, cam_x, cam_y, cam_z, light, fog);   /* the band */
+        return;
+    }
     static const double len[3] = { 20, 30, 95 };
     double a[3] = { 0, 3, -len[k->wtype] / 2 }, b[3] = { 0, 3, len[k->wtype] / 2 };
     limb(&fr, a, b, k->wtype == 2 ? 2.2 : 2.6, 2.6, k->wtype == 2 ? 1.6 : 2.4, 2.4, C_GUN, cam_x, cam_y, cam_z, light, fog);
@@ -1546,6 +1647,7 @@ void enh_foes_draw(u32 *xrgb, const EnhSnap *s, const EnhView *v, int em, int of
     night = !s->day;
     haze_rgb_ = haze;
     haze_k = enh_haze / 100.0;
+    enh_town_draw(xrgb, s, v, em, offx, offy, y0, y1);                  /* TOWNS.md: under the people */
     npoly = 0;
     for (int i = 0; i < NCIV; i++) if (civ[i].on) civ_figure(&civ[i], v->cam_x4, v->cam_y, v->cam_z4);
     for (int i = 0; i < NCOP; i++) if (cop[i].on) cop_figure(&cop[i], v->cam_x4, v->cam_y, v->cam_z4);
@@ -1560,18 +1662,10 @@ void enh_foes_draw(u32 *xrgb, const EnhSnap *s, const EnhView *v, int em, int of
         double r = fmax(2.0, atan2(16, dist) * RAD2PX * enh_scene_zoom() * enh_scale);
         enh_glow(xrgb, em, (tx + offx) * enh_scale, (ty + offy) * enh_scale, r * 1.4, 0xFF9030, 0.9);
     }
-    if (!amb.on) { enh_polys(xrgb, em, polys, npoly, offx, offy, y0, y1); return; }
-    for (int i = 0; i < NFOE; i++) if (foe[i].on) figure(&foe[i], v->cam_x4, v->cam_y, v->cam_z4);
+    if (amb.on) for (int i = 0; i < NFOE; i++) if (foe[i].on) figure(&foe[i], v->cam_x4, v->cam_y, v->cam_z4);
     for (int i = 0; i < NPICK; i++) if (pick[i].on) pickup_model(&pick[i], v->cam_x4, v->cam_y, v->cam_z4);
     enh_polys(xrgb, em, polys, npoly, offx, offy, y0, y1);
-    /* the dropped guns glint, so that they are found */
-    for (int i = 0; i < NPICK; i++) {
-        const Pick *k = &pick[i];
-        double tx, ty, dist;
-        if (!k->on || !enh_front_point(k->x, k->y + 12, k->z, &tx, &ty, &dist) || dist < 20 || dist > 6000) continue;
-        double r = fmax(2.0, atan2(14, dist) * RAD2PX * enh_scene_zoom() * enh_scale) * (0.8 + 0.4 * sin(k->t * 6));
-        enh_glow(xrgb, em, (tx + offx) * enh_scale, (ty + offy) * enh_scale, r, 0xFFE070, 0.55);
-    }
+    if (!amb.on) return;
     /* their muzzle flashes */
     for (int i = 0; i < NFOE; i++) {
         const Foe *f = &foe[i];
@@ -1637,6 +1731,17 @@ void enh_foes_hud(u32 *xrgb, const EnhSnap *s, const EnhView *v, int em)
                 *o = f * 100 < health ? col : 0x303030;
             }
     }
+    if (show && armour > 0.5) {                                          /* TOWNS.md: the vest, over the health */
+        int x0 = s->foot ? em + 8 : em + 6, y0 = (s->foot ? 186 : 19) - 5, wd = 62, hg = 2;
+        for (int y = (y0 - 1) * S; y < (y0 + hg) * S; y++)
+            for (int x = (x0 - 1) * S; x < (x0 + wd + 1) * S; x++) {
+                if (x < 0 || x >= FW || y < 0 || y >= FH) continue;
+                u32 *o = xrgb + (size_t)y * FW + x;
+                bool in = x >= x0 * S && x < (x0 + wd) * S && y >= y0 * S && y < (y0 + hg) * S;
+                double f = (x - x0 * S) / (double)(wd * S);
+                *o = !in ? 0x101010 : f * 100 < armour ? 0x50A0FF : 0x283040;
+            }
+    }
     /* POLICE.md: the wanted stars (flashing while they search), the police's messages, the way to the car */
     if (wnt.stars > 0) {
         bool on = wnt.seen_t < 1.5 || fmod(wnt.seen_t, 0.6) < 0.35;
@@ -1644,7 +1749,7 @@ void enh_foes_hud(u32 *xrgb, const EnhSnap *s, const EnhView *v, int em)
             enh_text(xrgb, FW, FH, S, "*", em + 160 - 26 + i * 18, 20, 2, i < wnt.stars ? (on ? 0xFFD030 : 0x806818) : 0x303030, false);
     }
     if (wnt.msg_t > 0) {
-        static const char *m[] = { "", "WANTED!", "LOST THEM", "BUSTED!", "YOUR CAR IS BEING STOLEN!" };
+        static const char *m[] = { "", "WANTED!", "LOST THEM", "BUSTED!", "YOUR CAR IS BEING STOLEN!", "BAILED OUT - WEAPONS TAKEN" };
         const char *t = m[wnt.msg];
         enh_text(xrgb, FW, FH, S, t, em + 160 - enh_text_width(t, wnt.msg == 3 ? 2 : 1) / 2, wnt.msg == 3 ? 80 : 34,
                  wnt.msg == 3 ? 2 : 1, wnt.msg == 2 ? 0x80FF80 : 0xFF6040, true);
@@ -1674,4 +1779,5 @@ void enh_foes_hud(u32 *xrgb, const EnhSnap *s, const EnhView *v, int em)
         bool on = amb.msg != 1 || fmod(amb.msg_t, 0.5) > 0.2;
         if (on) enh_text(xrgb, FW, FH, S, t, em + 160 - enh_text_width(t, 1) / 2, 30, 1, amb.msg == 1 ? 0xFF6040 : 0x80FF80, true);
     }
+    enh_town_hud(xrgb, s, v, em);                                        /* TOWNS.md */
 }

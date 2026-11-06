@@ -1,19 +1,29 @@
-# The weapons (fork og3, og5)
+# The weapons (fork og3, og5, og8)
 
-On foot (`FOOT.md`) the walker carries a pistol, and takes the uzis and shotguns the ambushes' gunmen drop
-(`FOES.md`). Shots hit what the view shows; vehicles stop and burn out. Marked `OG:` in the code.
+On foot (`FOOT.md`) the walker is unarmed at first (the fists), carries a pistol, and takes the uzis and shotguns the ambushes'
+gunmen drop (`FOES.md`). Shots hit what the view shows; vehicles stop and burn out. Marked `OG:` in the code.
 
 | | Pad | Keyboard / mouse |
 |---|---|---|
-| Fire (the uzi: held) | RT | left mouse button, F |
+| Fire (the uzi: held); the fists: punch | RT | left mouse button, F |
 | Aim down the sights (narrower view, slower turning, less spread) | hold LT | hold the right mouse button |
 | Reload (also when firing an empty gun; the shotgun shell by shell, fire stops it) | X | R |
-| Next / previous weapon | RB or d-pad right / d-pad left | Q, the mouse wheel; 1 2 3 choose |
+| Next / previous weapon (the fists first) | RB or d-pad right / d-pad left | Q, the mouse wheel; 1 fists, 2 3 4 the guns |
 | Look | right stick | the mouse (captured while on foot), or the arrow keys |
 
 On foot the radio moved to the d-pad's down. The weapon, the rounds in it and in reserve show at the bottom right;
 the crosshair (from the hip) opens with movement and firing (the shotgun's shows its pattern) and shows red ticks
 when a vehicle or a gunman was hit.
+
+## The fists (og8)
+
+Out of the car the walker is always unarmed: nothing in the view, no weapon shown; changing the weapon brings out
+the guns, and the fists come after the last gun again (an empty gun with no reserve changes to them too). RT punches: a
+fist comes up from below, out to the middle and down again, left and right in turn (0.38 s a punch, the next once
+the last is nearly back): at 0.1 s the arm is out and the
+nearest person within 1.4 m along the view (the face, the chest or lower) is hit, 34 (the head 50): three punches
+drop a gunman, an officer or a civilian, with the crimes and the police as for shots (`POLICE.md`). A wall or a car
+within reach only thuds. No aiming down the sights, no crosshair. Synthesised swish and punch sounds.
 
 ## The three
 
@@ -26,9 +36,10 @@ when a vehicle or a gunman was hit.
 | Vehicle (5 stop it) | 1 | 0.55 | 0.36 a pellet (two shots) |
 | Reload | 1.3 s | 1.6 s | 0.3 s, then 0.42 s a shell |
 
-The game starts with the pistol and 12 + 24 rounds. A gunman's gun lies where he fell, glinting: walking over it
+The game starts with the pistol and 12 + 24 rounds. A gunman's gun lies where he fell (og8: no glint, it is found by
+looking): walking over it
 (or driving over it) takes it with 4 to 44 rounds (the pistol 10 to 20, the uzi 24 to 44, the shotgun 4 to 9); a new
-weapon goes into the hand (when it is the next one up or the one in hand is empty), one already carried adds its
+weapon goes into the hand (when it is the next one up, the one in hand is empty, or the fists are up), one already carried adds its
 rounds ("UZI AMMO") as far as the reserve's limit (a full one stays lying). Firing an empty weapon with no reserve
 changes to the next one with rounds. **Shot dead, the walker loses everything but the pistol and 12 + 24 rounds.**
 

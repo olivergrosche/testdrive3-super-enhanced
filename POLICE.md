@@ -29,7 +29,7 @@ police then know where the player is. Shooting the ambushes' gunmen is no crime.
   out at its sides.
 * **The officers** (navy uniforms, caps, pistols) see the player within 8000 along a line of sight. At one star they
   run to arrest: an officer within 150 of the walker, or 260 of the stopped car, for 1.2 s: "BUSTED!", and a life
-  is lost the game's way a second later. From two stars they shoot (bursts of two, a little less sure than the
+  is lost the game's way a second later (TOWNS.md: with $200, the bail is paid instead and the weapons are taken). From two stars they shoot (bursts of two, a little less sure than the
   gunmen). They can be shot (100 health) and run over.
 
 ## The search
@@ -42,6 +42,9 @@ police then know where the player is. Shooting the ambushes' gunmen is no crime.
   the officers walk back to their cars and go.
 * Out of sight for more than 3 s, a chasing car within 2500 of the last known place stops there and its crew
   searches on foot: they run to the place and then walk from spot to spot within 300 to 1500 of it.
+
+TOWNS.md: a garage's respray ($100 a star, not in the police's sight) and a police station's fine ($150 a star)
+also end it.
 
 The police cars keep to the lanes as in the original: off the road, behind a hill or a house, in the trees, a hidden
 player can only be found by the officers on foot.

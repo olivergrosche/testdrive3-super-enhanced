@@ -44,6 +44,12 @@
 #define F_MOUSE_LOOK   0.62    /* rows a mouse pixel */
 #define F_ENTER      440.0     /* from the car's centre (its length is about 460) */
 #define F_SPAWN      135.0     /* beside the car's centre line, then pushed clear */
+/* the leg's map: 32 x 16 cells of 4096 x4 units; its coordinates wrap at the edges (z at exactly the map's height),
+ * which no car ever reaches, but a walker did and came out at the far side with no way back: kept inside */
+#define F_MAP_X      131072.0
+#define F_MAP_Z      65536.0
+#define F_EDGE       1024.0    /* from the map's edge */
+static bool keep_on_map(double *x, double *z);
 
 #define NOGROUND -1e9
 
@@ -319,6 +325,7 @@ static void get_out(void)
         double mx = qx - px, mz = qz - pz;
         if (mx * mx + mz * mz < 60.0 * 60.0) { px = qx; pz = qz; break; }
     }
+    keep_on_map(&px, &pz);                                           /* OG: not off the map's edge */
     DSL(DS_pos_x) = (u32)(s32)floor(px * 32.0 + 0.5);
     DSL(DS_pos_z) = (u32)(s32)floor(pz * 32.0 + 0.5);
     for (int i = 0; i < 3; i++) {
@@ -422,6 +429,7 @@ bool foot_car_pos(double *x4, double *z4, double *y, u16 *heading)
 void foot_move_car(double x4, double z4, double y, u16 heading)
 {
     if (!active) return;
+    keep_on_map(&x4, &z4);
     u32 px = (u32)(s32)floor(x4 * 32.0 + 0.5), pz = (u32)(s32)floor(z4 * 32.0 + 0.5), py = (u32)(s32)floor(y * 128.0 + 0.5);
     for (int i = 0; i < 4; i++) {                                    /* the position and its history */
         memcpy(car.pos + 12 * i, &px, 4); memcpy(car.pos + 12 * i + 4, &pz, 4); memcpy(car.pos + 12 * i + 8, &py, 4);
@@ -437,6 +445,32 @@ void foot_move_car(double x4, double z4, double y, u16 heading)
     DSW(DS_obj_z) = car.sprite_z;
     DSW(DS_obj_y8) = (u16)((u16)((s32)py >> 7) << 3);
     DSW(DS_obj_heading) = (u16)((((u16)((heading & 0xFFC0) - 0x4000) & 0xFF00) >> 8) * 0x101);
+}
+
+void foot_teleport(double x4, double z4, double feet)
+{
+    if (!active) return;
+    DSL(DS_pos_x) = (u32)(s32)floor(x4 * 32.0 + 0.5);
+    DSL(DS_pos_z) = (u32)(s32)floor(z4 * 32.0 + 0.5);
+    DSL(DS_pos_y) = (u32)(s32)floor(feet * 128.0 + 0.5);
+    for (int i = 0; i < 3; i++) {
+        DSL(DS_pos_hist1 + 4 * i) = DSL(DS_pos_x + 4 * i);
+        DSL(DS_pos_hist2 + 4 * i) = DSL(DS_pos_x + 4 * i);
+        DSL(DS_pos_hist3 + 4 * i) = DSL(DS_pos_x + 4 * i);
+    }
+    vx = vz = vy = 0;
+    grounded = true;
+}
+
+/* inside the map, F_EDGE from its edges; true when it had to be moved */
+static bool keep_on_map(double *x, double *z)
+{
+    double x0 = *x, z0 = *z;
+    if (*x < F_EDGE) *x = F_EDGE;
+    if (*x > F_MAP_X - F_EDGE) *x = F_MAP_X - F_EDGE;
+    if (*z < F_EDGE) *z = F_EDGE;
+    if (*z > F_MAP_Z - F_EDGE) *z = F_MAP_Z - F_EDGE;
+    return *x != x0 || *z != z0;
 }
 
 void foot_set_view(double yaw, double look)
@@ -482,9 +516,13 @@ void foot_physics(void)
     if (in.jump && !jump_held && grounded) { vy = F_JUMP; grounded = false; }
     jump_held = in.jump;
 
-    double px = x4_of(DSL(DS_pos_x)), pz = x4_of(DSL(DS_pos_z)), feet = (s32)DSL(DS_pos_y) / 128.0;
+    double px = (s32)DSL(DS_pos_x) / 32.0, pz = (s32)DSL(DS_pos_z) / 32.0, feet = (s32)DSL(DS_pos_y) / 128.0;
     double nx = px + vx * dt, nz = pz + vz * dt;
     bool hit = resolve(&nx, &nz, feet);
+    if (keep_on_map(&nx, &nz)) {                                     /* OG: the map's edge holds like a wall */
+        hit = true;
+        if (flog) fprintf(flog, "edge: held at %.0f %.0f\n", nx, nz);
+    }
     u8 type;
     double g = ground_at(nx, nz, feet + F_STEP, &type);
     if (type == 0x0E) {                                              /* water: not into it */

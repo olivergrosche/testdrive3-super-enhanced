@@ -33,8 +33,9 @@ on the road they turn off it, with no road 160 to their road side they turn towa
   run (3.8 m/s, hands on their heads, bent forwards) away for 7 to 13 s, catch their breath 1.5 to 3.5 s and go on;
 * the player's car faster than 25 coming at them (within 1700 ahead and 260 to the side): they jump aside for
   1.4 s;
-* hit (the weapons' damage, `WEAPON.md`; 100 health) they flinch and run; at nothing they fall. A car faster
-  than 8 within 190 runs them over.
+* hit (the weapons' damage, `WEAPON.md`; 100 health; the fists: three punches) they flinch and run; at nothing
+  they fall, and half the time leave a wallet ($5 to $40, `TOWNS.md`). A car faster than 8 within 190 runs them
+  over.
 
 ## How they look
 

@@ -56,6 +56,11 @@ static int frame_ticks = HOST_DEFAULT_FRAME_TICKS;
 static void process_events(void);
 static void pad_update(void);   /* OG: gamepad controls */
 static bool foot_on, foot_req;  /* OG: on foot (FOOT.md): walking controls; a get-out / get-in request */
+static bool menu_on;            /* OG (TOWNS.md): a shop's menu takes the controls */
+static int menu_bits;
+static double menu_stick;       /* the stick's last direction (-1, 0, 1) and when it repeats */
+static Uint64 menu_rep_at;
+static bool menu_held[SDL_SCANCODE_COUNT];   /* down when the menu opened, or since: a press counts once, let go */
 static float foot_mdx, foot_mdy;  /* OG: mouse motion for looking on foot */
 static int foot_wsel, foot_wcycle;  /* OG: a weapon asked for (WEAPON.md) */
 static bool window_focus = true;
@@ -567,6 +572,22 @@ static void key_event(SDL_Scancode sc, bool down)
         if (down) feed(make, sizeof make); else feed(brk, sizeof brk);
         return;
     }
+    /* OG (TOWNS.md): a shop's menu on foot takes its keys */
+    if (menu_on && enh_keys_racing()) {
+        int bit = 0;
+        switch (sc) {
+        case SDL_SCANCODE_W: case SDL_SCANCODE_UP: bit = HOST_MENU_UP; break;
+        case SDL_SCANCODE_S: case SDL_SCANCODE_DOWN: bit = HOST_MENU_DOWN; break;
+        case SDL_SCANCODE_SPACE: case SDL_SCANCODE_RETURN: case SDL_SCANCODE_KP_ENTER: bit = HOST_MENU_OK; break;
+        case SDL_SCANCODE_E: case SDL_SCANCODE_BACKSPACE: case SDL_SCANCODE_ESCAPE: bit = HOST_MENU_BACK; break;
+        default: break;
+        }
+        if (bit) {
+            if (down && !menu_held[sc]) menu_bits |= bit;            /* not a repeat, nor held over from walking */
+            menu_held[sc] = down;
+            return;
+        }
+    }
     /* OG: F8 switches between the chase view and the cockpit while racing */
     if (sc == SDL_SCANCODE_F8 && enh_keys_racing()) {
         if (down) enh_chase_toggle();
@@ -574,9 +595,9 @@ static void key_event(SDL_Scancode sc, bool down)
     }
     /* OG (WEAPON.md): on foot 1 2 3 choose the weapon, Q the next one */
     if (foot_on && enh_keys_racing() && !(SDL_GetModState() & (SDL_KMOD_CTRL | SDL_KMOD_ALT)) &&
-        (sc == SDL_SCANCODE_1 || sc == SDL_SCANCODE_2 || sc == SDL_SCANCODE_3 || sc == SDL_SCANCODE_Q)) {
+        (sc == SDL_SCANCODE_1 || sc == SDL_SCANCODE_2 || sc == SDL_SCANCODE_3 || sc == SDL_SCANCODE_4 || sc == SDL_SCANCODE_Q)) {
         if (down && sc == SDL_SCANCODE_Q) foot_wcycle++;
-        else if (down) foot_wsel = sc == SDL_SCANCODE_1 ? 1 : sc == SDL_SCANCODE_2 ? 2 : 3;
+        else if (down) foot_wsel = sc == SDL_SCANCODE_1 ? 1 : sc == SDL_SCANCODE_2 ? 2 : sc == SDL_SCANCODE_3 ? 3 : 4;
         return;
     }
     /* OG: E gets out of the car and back in (FOOT.md); Ctrl+E stays the engine sound */
@@ -790,7 +811,24 @@ static void pad_update(void)
             enh_chase_toggle();
         pad_y_wait = pad_y_fired = false;
     } else if (EDGE(NORTH)) pad_y_at = SDL_GetTicksNS();
-    if (ctx == PAD_RACE && foot_on) {
+    if (ctx == PAD_RACE && foot_on && menu_on) {        /* OG (TOWNS.md): a shop's menu */
+        pad_hold(NULL, 0);
+        double ly = pad_axis(SDL_GAMEPAD_AXIS_LEFTY), dir = ly < -0.6 ? -1 : ly > 0.6 ? 1 : 0;
+        Uint64 now = SDL_GetTicksNS();
+        if (dir != menu_stick) {
+            menu_stick = dir;
+            if (dir) { menu_bits |= dir < 0 ? HOST_MENU_UP : HOST_MENU_DOWN; menu_rep_at = now + 400 * SDL_NS_PER_MS; }
+        } else if (dir && now >= menu_rep_at) {
+            menu_bits |= dir < 0 ? HOST_MENU_UP : HOST_MENU_DOWN;
+            menu_rep_at = now + 150 * SDL_NS_PER_MS;
+        }
+        if (EDGE(DPAD_UP)) menu_bits |= HOST_MENU_UP;
+        if (EDGE(DPAD_DOWN)) menu_bits |= HOST_MENU_DOWN;
+        if (EDGE(SOUTH)) menu_bits |= HOST_MENU_OK;
+        if (EDGE(EAST) || EDGE(NORTH)) menu_bits |= HOST_MENU_BACK;
+        pad_y_wait = true;                            /* Y is let go before it gets in again */
+        enh_chase_look(0);
+    } else if (ctx == PAD_RACE && foot_on) {
         pad_hold(NULL, 0);
         if (EDGE(NORTH) && !pad_y_wait) foot_req = true;
         if (EDGE(START)) pad_tap_ctrl(0x19);
@@ -874,6 +912,33 @@ void host_pad_steer_off(void) { pad_steer_on = false; }
 
 /* ---------------------------------------------------------------- OG: on foot (FOOT.md) */
 
+void host_menu(bool on)
+{
+    if (on && !menu_on) {
+        menu_bits = 0;
+        /* what is held now (walking in) counts only after it was let go */
+        int nk = 0;
+        const bool *k = SDL_GetKeyboardState(&nk);
+        for (int i = 0; i < SDL_SCANCODE_COUNT; i++) menu_held[i] = i < nk && k[i];
+        menu_stick = 0;
+        if (gamepad) {
+            double ly = pad_axis(SDL_GAMEPAD_AXIS_LEFTY);
+            menu_stick = ly < -0.6 ? -1 : ly > 0.6 ? 1 : 0;
+            menu_rep_at = UINT64_MAX;                 /* a stick held from walking in: back to the middle first */
+            for (int i = 0; i < SDL_GAMEPAD_BUTTON_COUNT; i++) pad_prev[i] = SDL_GetGamepadButton(gamepad, (SDL_GamepadButton)i);
+        }
+    }
+    menu_on = on;
+    foot_req = false;
+}
+
+int host_menu_input(void)
+{
+    int b = menu_bits;
+    menu_bits = 0;
+    return b;
+}
+
 bool host_foot_request(void)
 {
     bool r = foot_req;
@@ -925,6 +990,7 @@ static void stick(SDL_GamepadAxis ax, SDL_GamepadAxis ay, double dz, double *x, 
 void host_foot_input(HostFootInput *in)
 {
     memset(in, 0, sizeof *in);
+    if (menu_on) return;                                            /* OG (TOWNS.md): standing at the counter */
     const bool *k = SDL_GetKeyboardState(NULL);
     if (k[SDL_SCANCODE_W] || k[SDL_SCANCODE_UP]) in->move_y += 1;
     if (k[SDL_SCANCODE_S] || k[SDL_SCANCODE_DOWN]) in->move_y -= 1;

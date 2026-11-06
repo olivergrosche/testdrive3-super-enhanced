@@ -674,6 +674,7 @@ static void foot_view(EnhView *v, const EnhSnap *c, u64 now)
     if (autoaim && enh_foes_aim(v->cam_x4, v->cam_y, v->cam_z4, &yaw, &look)) foot_set_view(yaw, look);
     double g = enh_ground_height(c, v->cam_x4, v->cam_z4, v->cam_y, 64.0);
     if (v->cam_y < g + 3 * ENH_EYE_CLEAR) v->cam_y = g + 3 * ENH_EYE_CLEAR;
+    yaw += enh_town_sway();                               /* OG (TOWNS.md): a beer too many */
     v->heading = yaw - floor(yaw / 65536.0) * 65536.0;
     v->cam_row = FOOT_ROW / enh_foot_zoom() + look;       /* in the projection's rows (enh_scene.c ZOOM) */
     v->pitch = 0;

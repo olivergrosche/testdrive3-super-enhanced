@@ -323,5 +323,33 @@ bool enh_foes_aim(double ex, double ey, double ez, double *yaw, double *look);
 /* POLICE.md: a crime of `level` (1 .. 3 stars) where the player is, if someone saw it */
 void enh_police_crime(int level);
 
+/* ---- OG: villages (enh_town.c, TOWNS.md) ---- */
+#define ENH_BAIL 200                    /* dollars: busted with this much, the police let the player go */
+/* once per displayed frame from enh_foes_frame (the race running): the leg's houses, the services, the money */
+void enh_town_frame(const EnhSnap *c, const EnhView *v, double dt);
+/* the services' signs and markers, before the people (enh_foes_draw) */
+void enh_town_draw(u32 *xrgb, const EnhSnap *s, const EnhView *v, int em, int offx, int offy, int y0, int y1);
+/* the money, the way to the services, the village's name, a shop's menu (from enh_foes_hud) */
+void enh_town_hud(u32 *xrgb, const EnhSnap *s, const EnhView *v, int em);
+bool enh_town_car_armour(void);         /* the car plated (the garage): shots hurt less in it */
+double enh_town_sway(void);             /* the beer: the walker's view sways by this much (heading units) */
+int  enh_money(void);
+void enh_money_add(int dollars, const char *why);
+bool enh_money_pay(int dollars, const char *why);   /* false (nothing paid): not enough */
+void enh_town_dump(void);
+/* enh_foes.c, for the shops */
+double enh_foes_health(void);
+double enh_foes_armour(void);
+void enh_foes_heal(double hp);
+void enh_foes_add_armour(double a);
+int  enh_foes_stars(void);
+bool enh_foes_police_see(void);
+void enh_foes_clear_wanted(void);
+bool enh_foes_danger(double x, double z);
+/* enh_gun.c, for the gun shop */
+void enh_gun_state(int w, bool *owned, int *rounds, int *room);
+void enh_gun_confiscate(void);
+bool enh_draw_mask_shows(int x, int y);   /* the 3D view shows at frame VGA pixel (x, y) (enh_draw_mask) */
+
 /* a world point in the last front view built: target pixel (view pixels, real), its distance; false behind */
 bool enh_front_point(double x4, double y, double z4, double *tx, double *ty, double *dist);
