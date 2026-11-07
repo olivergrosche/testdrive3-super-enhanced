@@ -20,6 +20,7 @@
 
 #include "../host.h"
 #include "game/foot.h"
+#include "game/animals.h"
 #include "game/weapon.h"
 #include "sound/pcm_sfx.h"
 
@@ -92,6 +93,7 @@ static Cop cop[NCOP];
 static struct {
     int stars;
     double seen_t, lkx, lkz, lky, msg_t, busted_t, unit_t, sees_t, since;
+    double lkX;                         /* the last place's x, true x4 (car_true_near) */
     int msg;                            /* 1 WANTED, 2 LOST THEM, 3 BUSTED */
     bool seen, arrived;                 /* arrived: the police got near the last place (the search can be lost) */
 } wnt;
@@ -175,6 +177,12 @@ static double frand(void)
 static double srand1(void) { return frand() * 2 - 1; }
 static inline double wraps(double a) { a = fmod(a, 65536.0); if (a < -32768) a += 65536; if (a >= 32768) a -= 65536; return a; }
 
+/* The player's x, true x4. The wrapped places (the snapshot's, the cars' (u16)(x << 2)) part every 655 m east-west on
+ * a map 1310 m wide: a car 632 m east of the player looked 22 m off, saw the player for ever and kept a getaway
+ * from ending. car_true_near: car o really within 320 m east-west of the true x X (then its wrapped place is right). */
+static double true_px(void) { return (u32)DSL(DS_pos_x) / 32.0; }
+static bool car_true_near(int o, double X) { return fabs(DSW(DS_obj_x + 2 * o) * 4.0 - X) < 32000; }
+
 static void clear_all(void)
 {
     memset(foe, 0, sizeof foe);
@@ -233,7 +241,7 @@ static bool spawn(const EnhSnap *c, bool test)
         u8 m = (u8)(fl & 0x3F);
         if (!(fl & 0x2000) || m == 0x11 || m == 0x30 || (m >= 0x12 && m <= 0x14)) continue;   /* police, trains */
         if (DSB(DS_race_computer_cars) != 0 && o <= 2) continue;                              /* the opponents */
-        if (weapon_frozen((u16)(2 * o))) continue;
+        if (weapon_frozen((u16)(2 * o)) || !car_true_near(o, true_px())) continue;
         double dx = wraps((u16)(DSW(DS_obj_x + 2 * o) << 2) - px), dz = wraps((u16)(DSW(DS_obj_z + 2 * o) << 2) - pz);
         double along = dx * fx + dz * fz, lat = dx * rx + dz * rz;
         if (along < 2500 || along > 7000 || fabs(lat) > 1500) continue;
@@ -644,7 +652,7 @@ static bool someone_near(double x, double z, double police_r, double civ_r)
 {
     int n = DSW(DS_obj_a475);
     for (int o = 1; o < n && o < 160; o++) {
-        if (!weapon_is_police(o) || weapon_wrecked(o)) continue;
+        if (!weapon_is_police(o) || weapon_wrecked(o) || !car_true_near(o, true_px())) continue;
         double dx = wraps((u16)(DSW(DS_obj_x + 2 * o) << 2) - x), dz = wraps((u16)(DSW(DS_obj_z + 2 * o) << 2) - z);
         if (dx * dx + dz * dz < police_r * police_r) return true;
     }
@@ -665,7 +673,7 @@ void enh_police_crime(int level)
     wnt.stars = ns;
     weapon_set_wanted(ns);
     wnt.seen_t = 0;                                                     /* called in: they know where */
-    wnt.lkx = ppx; wnt.lkz = ppz; wnt.lky = ppy;
+    wnt.lkx = ppx; wnt.lkz = ppz; wnt.lky = ppy; wnt.lkX = true_px();
     if (SDL_getenv("TD3_FOES_DEBUG")) fprintf(stderr, "crime %d -> %d stars\n", level, ns);
 }
 
@@ -731,7 +739,7 @@ static void police_update(const EnhSnap *c, const EnhView *v, double dt, double 
         test_gen = gen_seen;
         wnt.stars = (int)env_num("TD3_WANTED", 1);
         weapon_set_wanted(wnt.stars);
-        wnt.lkx = px; wnt.lkz = pz; wnt.lky = py; wnt.seen_t = 0; wnt.arrived = false; wnt.since = 0;
+        wnt.lkx = px; wnt.lkz = pz; wnt.lky = py; wnt.lkX = true_px(); wnt.seen_t = 0; wnt.arrived = false; wnt.since = 0;
     }
     double heading = v->heading * A2RAD;
     /* who sees the player: the cops' own looks, and the police cars, four times a second */
@@ -742,13 +750,21 @@ static void police_update(const EnhSnap *c, const EnhView *v, double dt, double 
         wnt.seen = false;
         int n = DSW(DS_obj_a475);
         for (int o = 1; o < n && o < c->nobj && wnt.stars > 0; o++) {
-            if (!weapon_is_police(o) || weapon_wrecked(o)) continue;
+            if (!weapon_is_police(o) || weapon_wrecked(o) || !car_true_near(o, true_px())) continue;
             double ox = px + wraps((u16)(DSW(DS_obj_x + 2 * o) << 2) - px), oz = pz + wraps((u16)(DSW(DS_obj_z + 2 * o) << 2) - pz);
             double oy = (s16)DSW(DS_obj_y8 + 2 * o) / 8.0 + 65;
             double dx = wraps(px - ox), dz = wraps(pz - oz), dy = py - oy, l = sqrt(dx * dx + dz * dz + dy * dy);
             if (l > 7000 || l < 1) continue;
             double d[3] = { dx / l, dy / l, dz / l };
-            if (enh_ray_world(c, v, ox, oy, oz, d, l - 60) >= l - 60) { wnt.seen = true; break; }
+            if (enh_ray_world(c, v, ox, oy, oz, d, l - 60) >= l - 60) {
+                wnt.seen = true;
+                if (SDL_getenv("TD3_FOES_DEBUG")) {
+                    static double last;
+                    double tdx = DSW(DS_obj_x + 2 * o) * 4.0 - (u32)DSL(DS_pos_x) / 32.0, tdz = DSW(DS_obj_z + 2 * o) * 4.0 - (u32)DSL(DS_pos_z) / 32.0;
+                    if (wnt.since - last > 5 || wnt.since < last) { last = wnt.since; fprintf(stderr, "police: car %d sees, wrapped %.0f, true %.0f %.0f\n", o, l, tdx, tdz); }
+                }
+                break;
+            }
         }
     }
     seen = seen || wnt.seen;
@@ -758,16 +774,23 @@ static void police_update(const EnhSnap *c, const EnhView *v, double dt, double 
         if (!wnt.arrived) {                                             /* the police on the scene yet? */
             int n = DSW(DS_obj_a475);
             for (int o = 1; o < n && o < 160 && !wnt.arrived; o++) {
-                if (!weapon_is_police(o)) continue;
+                if (!weapon_is_police(o) || !car_true_near(o, wnt.lkX)) continue;
                 double lx = wraps((u16)(DSW(DS_obj_x + 2 * o) << 2) - wnt.lkx), lz = wraps((u16)(DSW(DS_obj_z + 2 * o) << 2) - wnt.lkz);
                 if (lx * lx + lz * lz < 4000.0 * 4000.0) wnt.arrived = true;
             }
             for (int i = 0; i < NCOP; i++) if (cop[i].on && cop[i].hp > 0) wnt.arrived = true;
             if (wnt.since > 45) wnt.arrived = true;
         }
-        if (seen) { wnt.seen_t = 0; wnt.lkx = px; wnt.lkz = pz; wnt.lky = py; wnt.arrived = true; }
+        if (seen) { wnt.seen_t = 0; wnt.lkx = px; wnt.lkz = pz; wnt.lky = py; wnt.lkX = true_px(); wnt.arrived = true; }
         else if (wnt.arrived) wnt.seen_t += dt;
         static const double lose[4] = { 0, 12, 20, 30 };
+        static double dbg_t;
+        if (SDL_getenv("TD3_FOES_DEBUG") && (dbg_t += dt) > 5) {
+            dbg_t = 0;
+            fprintf(stderr, "police: %d stars, %s, %s, unseen %.0f s of %.0f, %.0f s since\n", wnt.stars,
+                    seen ? (wnt.seen ? "SEEN by a car" : "SEEN by a cop") : "not seen", wnt.arrived ? "arrived" : "not arrived",
+                    wnt.seen_t, lose[wnt.stars], wnt.since);
+        }
         if (wnt.seen_t > lose[wnt.stars]) police_clear(2);               /* LOST THEM */
     }
     if (wnt.stars > 0 && (wnt.unit_t -= dt) <= 0) {
@@ -777,12 +800,13 @@ static void police_update(const EnhSnap *c, const EnhView *v, double dt, double 
         for (int o = 1; o < n && o < 160; o++) {
             if (!weapon_is_police(o) || weapon_wrecked(o)) continue;
             model = DSW(DS_obj_flags + 2 * o) & 0x3F;
+            if (!car_true_near(o, true_px())) continue;
             double dx = wraps((u16)(DSW(DS_obj_x + 2 * o) << 2) - px), dz = wraps((u16)(DSW(DS_obj_z + 2 * o) << 2) - pz);
             if (dx * dx + dz * dz > 25000.0 * 25000.0) continue;
             weapon_police_chase(o);
             if (DSW(DS_obj_flags + 2 * o) & 0x4000) chasing++;
             /* not seen for a while and near the last place: it stops there, the crew searches on foot */
-            if (wnt.seen_t > 3 && (DSW(DS_obj_flags + 2 * o) & 0x4000)) {
+            if (wnt.seen_t > 3 && (DSW(DS_obj_flags + 2 * o) & 0x4000) && car_true_near(o, wnt.lkX)) {
                 double lx = wraps((u16)(DSW(DS_obj_x + 2 * o) << 2) - wnt.lkx), lz = wraps((u16)(DSW(DS_obj_z + 2 * o) << 2) - wnt.lkz);
                 if (lx * lx + lz * lz < 2500.0 * 2500.0) weapon_police_stop(o);
             }
@@ -795,7 +819,7 @@ static void police_update(const EnhSnap *c, const EnhView *v, double dt, double 
                 u8 m = (u8)(f & 0x3F);
                 if (!(f & 0x2000) || m == 0x11 || m == 0x30 || (m >= 0x12 && m <= 0x14)) continue;
                 if (DSB(DS_race_computer_cars) != 0 && o <= 2) continue;
-                if (weapon_frozen((u16)(2 * o))) continue;
+                if (weapon_frozen((u16)(2 * o)) || !car_true_near(o, true_px())) continue;
                 double dx = wraps((u16)(DSW(DS_obj_x + 2 * o) << 2) - px), dz = wraps((u16)(DSW(DS_obj_z + 2 * o) << 2) - pz);
                 double d = sqrt(dx * dx + dz * dz), rel = atan2(dx, dz) - heading;
                 rel -= floor(rel / (2 * M_PI) + 0.5) * 2 * M_PI;
@@ -1110,7 +1134,7 @@ void enh_foes_hot(int stars)
         weapon_set_wanted(stars);
     }
     wnt.seen_t = 0;
-    wnt.lkx = ppx; wnt.lkz = ppz; wnt.lky = ppy;
+    wnt.lkx = ppx; wnt.lkz = ppz; wnt.lky = ppy; wnt.lkX = true_px();
 }
 
 /* someone hostile at hand (a gunman on the alert within 60 m, an officer who sees the player): no shopping */
@@ -1407,6 +1431,7 @@ int enh_foes_damage(int i, int dmg)
 void enh_foes_heard(double x, double z)
 {
     civs_heard(x, z);                                                    /* CIVS.md */
+    animals_heard();                                                     /* ANIMALS.md */
     if (someone_near(x, z, 5000, 0)) enh_police_crime(1);               /* POLICE.md: shots near the police */
     for (int i = 0; i < NFOE; i++) {
         Foe *f = &foe[i];

@@ -6,6 +6,7 @@
  * rule at the snapshot's camera (per game frame, so coplanar faces do not swap between displayed frames). */
 #include "enh_internal.h"
 #include "game/village.h"
+#include "game/animals.h"
 
 #include <math.h>
 #include <stdlib.h>
@@ -278,8 +279,23 @@ void enh_far_build(EnhSnap *s)
             u16 f = DSW(DS_obj_flags + o);
             if ((f >> 8) & 0x30) continue;                     /* moving / parked */
             if ((f & 0x3F) == 0) continue;
+            if (animals_static_hidden(o >> 1)) continue;       /* OG (ANIMALS.md): drawn where it walks */
             place((u8)f, 1, DSW(DS_obj_x + o), z, (u16)(DSW(DS_obj_y8 + o) >> 3),
                   (u8)((DSW(DS_obj_heading + o) >> 8) & 0xC0), (s8)(DSW(DS_obj_pitch + o) >> 8));
+        }
+    }
+    /* OG (ANIMALS.md): the static animals the game's frame did not take, where they are now, within the ring */
+    {
+        u8 am, arot;
+        u16 ax, az, ay;
+        for (int k = 0; animals_far(k, &am, &ax, &az, &ay, &arot); k++) {
+            double ex = ax / 1024.0 - cx, ez = az / 1024.0 - cz;
+            if (ex * ex + ez * ez > (double)R * R) continue;
+            u16 es = DSW(DS_objects_set + 2), set = DSW(DS_objects_set);
+            if (!es) continue;
+            u16 si = (u16)(rd16(es, (u16)(set + 2 * am)) + set);
+            int nf = rd8(es, si), nv = rd8(es, (u16)(si + 1));
+            if (nf && nv) emit(es, (u16)(si + 4), nf, nv, ax, az, ay, arot, 0);
         }
     }
     /* OG (TOWNS.md): the planned villages' houses the game's build did not take (game/village.c), within the ring */

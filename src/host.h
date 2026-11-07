@@ -117,6 +117,9 @@ void host_speaker(u16 divisor, bool on);        /* PIT ch2 divisor (0 = 65536) a
 char *host_game_path(const char *name, bool create);
 void  host_free(void *p);
 
+/* ---- OG developer aid: the next presented frame is saved as a BMP at `path` */
+void host_snapshot_to(const char *path);
+
 /* ---- Errors: shows a message box, shuts down and exits with code 3. */
 _Noreturn void host_fatal(const char *fmt, ...);
 

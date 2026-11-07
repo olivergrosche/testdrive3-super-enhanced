@@ -52,13 +52,19 @@ static const Village villages[] = {
 };
 #define NVILLAGES ((int)(sizeof villages / sizeof villages[0]))
 
+#define VERT_ROOM 1100                  /* the game's 1584 vertices less the scenery of the cells built after */
 #define SLOPE_MAX 12.0                  /* height units (about 28 cm) the ground may rise under a house and round it */
 
-static VillageHouse placed[24];
+#define NPLACED 64
+static VillageHouse placed[NPLACED];
 static int nplaced;
 static struct { double x, z; int sv; } tags[8];
 static int ntags;
-static bool emitted[24];
+static bool emitted[NPLACED];
+/* the villages enh_town.c plans at a leg's start (TOWNS.md "More villages"), for that scene and leg only */
+static Plan autop[NPLACED];
+static int nauto, auto_scene = -1, auto_leg = -1;
+static u32 auto_gen;
 static int build_col, build_row;
 static const char *placed_name;
 static u32 placed_key = 0xFFFFFFFFu;
@@ -155,11 +161,50 @@ static double ground(double X, double Z)
 }
 
 double village_ground(double X, double Z) { return ground(X, Z); }
+int village_ground_type(void) { return ground_type; }
 
-/* the current leg's houses: placed again when the leg or its data changed */
+/* a planned house placed, if the ground there is level */
+static void place_plan(const Plan *p, const char *name, int i)
+{
+    if (nplaced >= NPLACED) return;
+    double cx, cz, hx, hz;
+    if (!model_middle(p->model, p->parked, &cx, &cz, &hx, &hz)) return;
+    /* vertex_rotate: x' = x cos + z sin, z' = -x sin + z cos; the origin so that the middle lands there */
+    double phi = p->rot * (2.0 * M_PI / 256.0), cs = cos(phi), sn = sin(phi);
+    double ox = p->x - (cx * cs + cz * sn), oz = p->z - (-cx * sn + cz * cs);
+    /* level ground only: a 5 x 5 grid over the footprint and 1.5 m round it; a house on a slope or at its foot
+     * (half sunk into the hill, or floating) is left out */
+    double g = 1e9, gmax = -1e9;
+    bool hole = false, wet = false;
+    for (int iu = 0; iu < 5; iu++)
+        for (int iw = 0; iw < 5; iw++) {
+            double u = (iu - 2) / 2.0 * (hx + 150), w = (iw - 2) / 2.0 * (hz + 150);
+            double gy = ground(p->x + u * cs + w * sn, p->z - u * sn + w * cs);
+            if (gy < -1e8) { hole = true; continue; }
+            if (ground_type == 0x0E || (ground_type >= 0x10 && ground_type <= 0x14)) wet = true;   /* water, road */
+            if (gy < g) g = gy;
+            if (gy > gmax) gmax = gy;
+        }
+    if (SDL_getenv("TD3_TOWN_DUMP"))
+        SDL_Log("village: %s house %d (model %d) at %.0f %.0f: ground %.0f .. %.0f%s", name, i, p->model, p->x, p->z,
+                g, gmax, hole || g > 1e8 ? " (no ground: left out)" : wet ? " (water or road: left out)" :
+                gmax - g > SLOPE_MAX ? " (a slope: left out)" : "");
+    if (hole || wet || g > 1e8 || gmax - g > SLOPE_MAX) return;
+    VillageHouse *h = &placed[nplaced++];
+    h->model = p->model;
+    h->parked = p->parked;
+    h->px = (u16)lround(ox / 4.0);
+    h->pz = (u16)lround(oz / 4.0);
+    h->py = (u16)lround(g);
+    h->rot = p->rot;
+    h->sv = p->sv;
+}
+
+/* the current leg's houses: placed again when the leg or its data changed, or a new plan came */
 static void prepare(void)
 {
-    u32 key = (u32)DSW(DS_scene_index) << 24 ^ (u32)DSB(DS_leg_index) << 16 ^ DSW(DS_objects_set) ^ (u32)DSW(DS_objects_set + 2) << 8;
+    u32 key = (u32)DSW(DS_scene_index) << 24 ^ (u32)DSB(DS_leg_index) << 16 ^ DSW(DS_objects_set) ^
+              (u32)DSW(DS_objects_set + 2) << 8 ^ auto_gen * 0x9E3779B1u;
     if (key == placed_key) return;
     placed_key = key;
     nplaced = 0;
@@ -169,45 +214,38 @@ static void prepare(void)
         const Village *V = &villages[v];
         if (V->scene != DSW(DS_scene_index) || V->leg != DSB(DS_leg_index)) continue;
         placed_name = V->name;
-        for (int i = 0; i < V->n && nplaced < 24; i++) {
+        for (int i = 0; i < V->n; i++) {
             const Plan *p = &V->h[i];
             if (p->model == 0) {                                     /* a service for one of the leg's houses */
                 if (ntags < 8) { tags[ntags].x = p->x; tags[ntags].z = p->z; tags[ntags].sv = p->sv; ntags++; }
                 continue;
             }
-            double cx, cz, hx, hz;
-            if (!model_middle(p->model, p->parked, &cx, &cz, &hx, &hz)) continue;
-            /* vertex_rotate: x' = x cos + z sin, z' = -x sin + z cos; the origin so that the middle lands there */
-            double phi = p->rot * (2.0 * M_PI / 256.0), cs = cos(phi), sn = sin(phi);
-            double ox = p->x - (cx * cs + cz * sn), oz = p->z - (-cx * sn + cz * cs);
-            /* level ground only: a 5 x 5 grid over the footprint and 1.5 m round it; a house on a slope or at its foot
-             * (half sunk into the hill, or floating) is left out */
-            double g = 1e9, gmax = -1e9;
-            bool hole = false, wet = false;
-            for (int iu = 0; iu < 5; iu++)
-                for (int iw = 0; iw < 5; iw++) {
-                    double u = (iu - 2) / 2.0 * (hx + 150), w = (iw - 2) / 2.0 * (hz + 150);
-                    double gy = ground(p->x + u * cs + w * sn, p->z - u * sn + w * cs);
-                    if (gy < -1e8) { hole = true; continue; }
-                    if (ground_type == 0x0E || (ground_type >= 0x10 && ground_type <= 0x14)) wet = true;   /* water, road */
-                    if (gy < g) g = gy;
-                    if (gy > gmax) gmax = gy;
-                }
-            if (SDL_getenv("TD3_TOWN_DUMP"))
-                SDL_Log("village: %s house %d (model %d) at %.0f %.0f: ground %.0f .. %.0f%s", V->name, i, p->model, p->x, p->z,
-                        g, gmax, hole || g > 1e8 ? " (no ground: left out)" : wet ? " (water or road: left out)" :
-                        gmax - g > SLOPE_MAX ? " (a slope: left out)" : "");
-            if (hole || wet || g > 1e8 || gmax - g > SLOPE_MAX) continue;
-            VillageHouse *h = &placed[nplaced++];
-            h->model = p->model;
-            h->parked = p->parked;
-            h->px = (u16)lround(ox / 4.0);
-            h->pz = (u16)lround(oz / 4.0);
-            h->py = (u16)lround(g);
-            h->rot = p->rot;
-            h->sv = p->sv;
+            place_plan(p, V->name, i);
         }
     }
+    if (auto_scene == DSW(DS_scene_index) && auto_leg == DSB(DS_leg_index))
+        for (int i = 0; i < nauto; i++) place_plan(&autop[i], "(planned)", i);
+}
+
+void village_set_auto(const VillageAuto *h, int n)
+{
+    nauto = 0;
+    for (int i = 0; i < n && nauto < NPLACED; i++) {
+        Plan *p = &autop[nauto++];
+        p->model = h[i].model; p->parked = h[i].parked; p->x = h[i].x; p->z = h[i].z; p->rot = h[i].rot; p->sv = VSV_NONE;
+    }
+    auto_scene = DSW(DS_scene_index);
+    auto_leg = DSB(DS_leg_index);
+    auto_gen++;
+}
+
+bool village_model_size(u8 model, bool parked, double *hx, double *hz, int *nv)
+{
+    double cx, cz;
+    u16 es, a;
+    int nf;
+    if (!model_at(model, parked, &es, &a, &nf, nv)) return false;
+    return model_middle(model, parked, &cx, &cz, hx, hz);
 }
 
 int village_count(void)
@@ -260,10 +298,17 @@ void village_cell(u8 ch_x, u8 cz)
         if ((u8)((h->px >> 8) & 0x7C) != ch_x || (u8)((h->pz >> 8) & 0x3C) != cz) continue;
         int col = (h->px >> 10) & 31, row = 15 - ((h->pz >> 10) & 15);
         if (col != build_col || row != build_row) continue;               /* the far ring's */
-        emitted[i] = true;
         u16 es, a;
         int nf, nv;
         if (!model_at(h->model, h->parked, &es, &a, &nf, &nv)) continue;
+        /* room left for the cells built after this one (the game's own scenery first): a house the buffer cannot
+         * take now is the far ring's (drawn, not solid) */
+        if (DSW(DS_vert_count) + nv > VERT_ROOM) {
+            if (SDL_getenv("TD3_FACES_LOG")) SDL_Log("village: house %d not solid: %u + %d vertices", i, DSW(DS_vert_count), nv);
+            continue;
+        }
+        if (SDL_getenv("TD3_FACES_LOG")) SDL_Log("village: house %d built at %u + %d vertices", i, DSW(DS_vert_count), nv);
+        emitted[i] = true;
         DSW(DS_place_x) = h->px;
         DSW(DS_place_z) = h->pz;
         DSW(DS_place_y) = h->py;

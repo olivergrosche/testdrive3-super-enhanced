@@ -109,3 +109,6 @@ void enh_msgbox_clear(void);
  * over it. pal = the DAC as XRGB. Returns true while the enhanced view is shown (the picture changes with
  * time even when the game draws nothing). */
 bool enh_compose(u32 *xrgb, const u32 pal[256]);
+
+/* OG (ANIMALS.md, TOWNS.md): a house of the leg (its own or a planned one) within `grow` x4 units of (X, Z), true x4 */
+bool enh_town_house_at(double X, double Z, double grow);

@@ -292,13 +292,51 @@ static bool in_race(void)
            DSB(DS_ext_view) == 0 && DSB(DS_replay_state) == 0 && DSB(DS_frozen) == 0;
 }
 
+/* OG: getting out at speed. Up to F_OUT_SPEED the car stops where the walker gets out; faster, the request waits
+ * while the car brakes itself hard (the game's hard brake and F_BAIL_DECEL on top, foot_bail_controls) and the
+ * walker is out once it is that slow and on the ground. The gas, pressed anew, drives on instead. Before, the car
+ * had to stand (car_speed <= 2) and a brake held too long at a standstill put the reverse in (REVERSE.md). */
+#define F_OUT_SPEED     20     /* car_speed (about 0.77 km/h a unit, 2048 of speed_long): 15 km/h */
+#define F_BAIL_DECEL 117000.0  /* speed_long a second: about 12 m/s^2 */
+static bool bail, bail_gas_free;
+static u64 bail_at;
+
+static bool can_out(void) { return DSW(DS_car_speed) <= F_OUT_SPEED && DSB(DS_on_ground) != 0; }
+
+u8 foot_bail_controls(u8 cl)
+{
+    if (!bail) return cl;
+    if (!(cl & 1)) bail_gas_free = true;
+    else if (bail_gas_free) {                                        /* the gas pressed again: drive on */
+        bail = false;
+        if (flog) fprintf(flog, "out: cancelled by the gas\n");
+        return cl;
+    }
+    u64 now = host_time_ns();
+    double dt = (now - bail_at) / 1e9;
+    bail_at = now;
+    if (dt > 0.1) dt = 0.1;
+    if (DSB(DS_on_ground)) {
+        s32 v = DSSL(DS_speed_long), d = (s32)(F_BAIL_DECEL * dt);
+        DSSL(DS_speed_long) = v > d ? v - d : v < -d ? v + d : 0;
+    }
+    DSB(DS_throttle) = 0;
+    return (u8)((cl & ~3) | 0x20);                                   /* the hard brake, no pedal (and no reverse) */
+}
+
 static void get_out(void)
 {
     log_open();
-    if (DSW(DS_car_speed) > 2 || DSB(DS_on_ground) == 0) {           /* stop first */
-        if (flog) fprintf(flog, "out? speed %u on ground %u gear %u\n", DSW(DS_car_speed), DSB(DS_on_ground), DSB(DS_gear));
+    if (!can_out()) {                                                /* brake first (above) */
+        if (flog) fprintf(flog, "out? t %.2f speed %u on ground %u gear %u: braking\n", host_time_ns() / 1e9,
+                          DSW(DS_car_speed), DSB(DS_on_ground), DSB(DS_gear));
+        bail = true;
+        bail_gas_free = false;
+        bail_at = host_time_ns();
         return;
     }
+    if (flog) fprintf(flog, "out at speed %u%s\n", DSW(DS_car_speed), bail ? " (braked)" : "");
+    bail = false;
     car_save();
     DSSL(DS_speed_long) = 0;
     DSSL(DS_vel_x) = DSSL(DS_vel_z) = DSSL(DS_vel_y) = 0;
@@ -342,8 +380,8 @@ static void get_out(void)
     host_set_foot(true);
     publish();
     log_open();
-    if (flog) fprintf(flog, "out: car x4 %.1f z4 %.1f feet %.1f heading %.0f eye %u -> walker %.1f %.1f\n",
-                      cx, cz, feet, car.fine_heading, car.eye_height, px, pz);
+    if (flog) fprintf(flog, "out: t %.2f car x4 %.1f z4 %.1f feet %.1f heading %.0f eye %u -> walker %.1f %.1f\n",
+                      host_time_ns() / 1e9, cx, cz, feet, car.fine_heading, car.eye_height, px, pz);
 }
 
 /* the walker's distance from the car (object 0), x4 units */
@@ -352,6 +390,7 @@ static double car_distance(void)
     double px = x4_of(DSL(DS_pos_x)), pz = x4_of(DSL(DS_pos_z));
     double dx = (s16)(u16)((u16)(DSW(DS_obj_x) << 2) - (u16)(s32)floor(px));
     double dz = (s16)(u16)((u16)(DSW(DS_obj_z) << 2) - (u16)(s32)floor(pz));
+    if (fabs(DSW(DS_obj_x) * 4.0 - px) > 32000) return 1e9;          /* OG: 655 m east-west on, not beside it */
     return sqrt(dx * dx + dz * dz);
 }
 
@@ -378,13 +417,16 @@ static void get_in(void)
 
 void foot_frame_begin(void)
 {
-    if (!host_foot_request()) return;
-    if (!in_race()) return;
-    if (!active) get_out(); else get_in();
+    bool req = host_foot_request();
+    if (!in_race()) { bail = false; return; }
+    if (bail && can_out()) { get_out(); return; }                    /* braked enough: out */
+    if (!req) return;
+    if (!active) { if (!bail) get_out(); } else get_in();
 }
 
 void foot_reset(void)
 {
+    bail = false;
     if (!active) return;
     car_restore();
     leave_foot();

@@ -1,5 +1,42 @@
 # Changelog
 
+## 0.2.0-og10 (fork)
+
+- Every job's goal can be reached: a goal's door must be at most 40 m on foot from the leg's main road, searched over
+  the leg's ground (no water, no walls, no cliffs). A getaway's loot lay across a river with no road to it; the
+  houses by a bit of road with no way to the main road (Pacific - Yosemite's figure-eight track) are no goals
+  either. The way by road starts where that way on foot meets the road (`TOWNS.md` "On foot from the main road").
+- Towers are no houses: the pylons of the power line on Cape Cod - Niagara's fourth leg were a village with a gun
+  shop, a pub and a garage; the services now go to real houses.
+- The job's arrow pointed wrong for goals over 327 m east or west (the camera's place wraps every 655 m; a fare 652 m
+  away showed "3M" or no arrow at all). It now reckons in true map units and follows the road: it points along the
+  way by road and shows that way's length, straight at the goal only on the last 120 m (`TOWNS.md` "Jobs").
+- The same mix-up in the race and the stolen car: a stolen car could never get away (its distance never reached 500
+  m), and a rival could be taken, or the race lost, by a car 655 m east or west.
+- And in the police: a police car 632 m east of the player "saw" the player for ever, the wanted level never went and
+  a getaway could not end. Every check of a car against the player now makes sure it is really near (`POLICE.md`).
+- A job's door at a shop opens no shop menu while the job wants it (the menu held the walker at a getaway's loot).
+- No services on the traffic lights: the lights' gantry over the crossroads counted as a house and, being by the road,
+  was a pub, gun shop, garage or police station sixteen times on eight legs (the sign on the lights, the ring on the
+  crossroads). Nothing standing over the road is a house now; every service of the ten legs was looked at from the
+  road (`TOWNS.md`).
+- The race job's rival can be seen: a car within 60 m waits on the road with the arrow on it; pulled up beside it, 3 2
+  1 GO. Before, the nearest car within 150 m was taken wherever it was, and the rival was never seen.
+- The cows and horses live: they graze, walk about their pasture and run from a fast car, the walker and gunfire,
+  their legs swinging as they go (the game's own models; the lower legs turned about the hip for each animal's
+  drawing). Pacific - Yosemite's brown cattle too (`ANIMALS.md`).
+- More villages: on every leg two or three villages of the leg's own house models are planned at the start where the
+  main road runs straight, on level open ground on both sides, the fronts to the road (not on trees, by churches or
+  on other houses), as PILGRIM COVE was planned by hand. Every leg now has 12 to 34 houses and two of each service,
+  and races, getaways and bounties on every leg (`TOWNS.md` "More villages").
+- A job that cannot be made at a pub or police station (a getaway with no drop) is now another job; before, it was
+  kept and shown at the next visit as a job with no goal.
+- No "Press F6 to return to the road" box any more: off the road on purpose (to a village, parked by a house) it came
+  back again and again. F6 / L3 still bring the car back to the road.
+- Getting out while driving: Y held (E) gets out at once up to 15 km/h; faster, the car brakes itself hard and the
+  walker is out once it is that slow (from 70 km/h in under a second). The gas pressed anew drives on instead.
+  Before, the car had to stand, which in an ambush was stressful (`FOOT.md`).
+
 ## 0.2.0-og9 (fork)
 
 - Jobs, made up at random: the pub's barkeeper has parcels (express, hot goods with the police on your tail), a race

@@ -217,6 +217,10 @@ void host_speaker(u16 divisor, bool on)
     spk_on = on;
 }
 
+/* OG developer aid: the next presented frame saved as `path` (TOWNS.md TD3_TOWN_TOUR) */
+static char snap_to[512];
+void host_snapshot_to(const char *path) { SDL_strlcpy(snap_to, path, sizeof snap_to); }
+
 /* Developer aid: TD3_SNAPSHOT_DIR, see host.h. */
 static void snapshot(void)
 {
@@ -225,6 +229,11 @@ static void snapshot(void)
     static Uint64 last_ns;
     static int n;
     static Uint64 every = 2 * SDL_NS_PER_SECOND;
+    if (snap_to[0]) {
+        SDL_Surface *s = SDL_CreateSurfaceFrom(frame_w, frame_h, SDL_PIXELFORMAT_XRGB8888, frame, frame_w * 4);
+        if (s) { SDL_SaveBMP(s, snap_to); SDL_DestroySurface(s); }
+        snap_to[0] = 0;
+    }
     if (!checked) {
         dir = SDL_getenv("TD3_SNAPSHOT_DIR");
         const char *ms = SDL_getenv("TD3_SNAPSHOT_MS");       /* OG developer aid: another interval */

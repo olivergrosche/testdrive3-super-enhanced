@@ -469,6 +469,7 @@ static void controls_poll(void)
     cl |= ch;
     cl &= 0x3F;
     if (DSB(DS_mouse_on) && DSB(DS_ext_view) == 0) cl = mouse_controls(cl);
+    if (DSB(DS_ext_view) == 0) cl = foot_bail_controls(cl);   /* OG: getting out at speed brakes (FOOT.md) */
     if (DSB(DS_ext_view) == 0) cl = auto_reverse(cl);         /* OG: brake at a standstill = reverse */
     if (DSB(DS_ext_view) == 0) {
         ch = DSB(DS_prev_bits);

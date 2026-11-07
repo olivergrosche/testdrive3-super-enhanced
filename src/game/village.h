@@ -30,5 +30,13 @@ const char *village_name(void);
 void village_build_begin(void);
 void village_cell(u8 ch_x, u8 cz);
 bool village_emitted(int i);
+/* a village planned at the leg's start (enh_town.c, TOWNS.md "More villages"): its houses, each the middle of its
+ * walls (true x4) and its turn; placed (level ground only) with the planned ones from the next build */
+typedef struct { u8 model; bool parked; double x, z; u8 rot; } VillageAuto;
+void village_set_auto(const VillageAuto *h, int n);
+/* a model's half extents (its walls, its own frame) and vertex count */
+bool village_model_size(u8 model, bool parked, double *hx, double *hz, int *nv);
 /* the ground of the leg's tiles at (X, Z) (true x4 units), height units; -1e9 none (developer aids) */
 double village_ground(double X, double Z);
+/* the face type of the last village_ground (0Eh water, 10h..14h road), -1 none */
+int village_ground_type(void);

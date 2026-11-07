@@ -111,6 +111,7 @@ void world_build_visible(void)
             u16 f = DSW(DS_obj_flags + o);
             if ((f >> 8) & 0x30) continue;                /* moving / parked: drawn by 4d60 */
             if ((f & 0x3F) == 0) continue;
+            if (animals_static_hidden(o >> 1)) continue;  /* OG (ANIMALS.md): drawn every frame where it walks */
             DSB(DS_place_rot) = (u8)((DSW(DS_obj_heading + o) >> 8) & 0xC0);
             DSB(DS_place_shear) = (u8)(DSW(DS_obj_pitch + o) >> 8);
             DSW(DS_cur_obj_slot1) = (u16)(o + 2);

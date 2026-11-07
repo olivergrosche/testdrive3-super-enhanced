@@ -1107,6 +1107,36 @@ bool enh_compose(u32 *xrgb, const u32 pal[256])
     if (s->mirror_on) enh_target_raster(&enh_mirror, s);
 
     cpal = pal;
+    {   /* developer aid TD3_SPRITE_DUMP=dir: the scene's sprite images (dir/sprite_sS_NN.bmp, 4x) and the leg's own
+         * sprite instances (id, place) once a leg */
+        static int dumped = -1;
+        const char *sd = SDL_getenv("TD3_SPRITE_DUMP");
+        int key = DSW(DS_scene_index) * 16 + DSB(DS_leg_index);
+        if (sd && dumped != key && !s->menu_preview) {
+            dumped = key;
+            for (int id = 1; id < 32; id++) {
+                const EnhSprImg *im;
+                double w, h;
+                if (!enh_sprite_pick((u8)id, 20, &im, &w, &h)) continue;
+                SDL_Surface *sf = SDL_CreateSurface(im->w * 4, im->h * 4, SDL_PIXELFORMAT_XRGB8888);
+                if (!sf) continue;
+                for (int y = 0; y < im->h * 4; y++)
+                    for (int x = 0; x < im->w * 4; x++) {
+                        u8 c = im->pix[(y / 4) * im->w + x / 4];
+                        ((u32 *)sf->pixels)[y * (sf->pitch / 4) + x] = c ? pal[c] : 0xFF00FF;
+                    }
+                char path[512];
+                SDL_snprintf(path, sizeof path, "%s/sprite_s%d_%02d.bmp", sd, DSW(DS_scene_index), id);
+                SDL_SaveBMP(sf, path);
+                SDL_DestroySurface(sf);
+                fprintf(stderr, "sprite %2d: %dx%d kind %02X\n", id, im->w, im->h, DSB(DS_sprite_kind + id));
+            }
+            int cnt[64] = { 0 };
+            for (int i = 9; i < DSW(DS_sprite_count) && i < 320; i++) cnt[DSW(DS_sprite_id + 2 * i) & 0x3F]++;
+            for (int id = 0; id < 64; id++)
+                if (cnt[id]) fprintf(stderr, "sprite instances: id %2d x %d\n", id, cnt[id]);
+        }
+    }
     haze_rgb = pair_rgb(enh_haze_colour(s));
     PasteCtx pc = { xrgb, mp(0xA000, 0) };
     if (s->chase && !compare_on()) {                      /* OG: the whole screen but the instruments */

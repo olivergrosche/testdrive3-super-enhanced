@@ -7,7 +7,7 @@ in `src/game/foot.c`; the view is in `src/enhanced/enhanced.c` (`foot_view`) and
 
 | | Pad | Keyboard |
 |---|---|---|
-| Get out (car stopped) | hold Y (0.4 s; a short press still switches chase / cockpit) | E |
+| Get out (also while driving) | hold Y (0.4 s; a short press still switches chase / cockpit) | E |
 | Get in (near the car, "Y / E: GET IN" shows) | Y | E |
 | Walk | left stick | W S, Up Down; A D sideways |
 | Turn / look up and down | right stick | Left Right; Page Up / Page Down |
@@ -18,8 +18,15 @@ in `src/game/foot.c`; the view is in `src/enhanced/enhanced.c` (`foot_view`) and
 
 On foot the mouse looks around (the window captures it while it has the focus).
 
-On foot the driving, cockpit and replay keys do nothing (gears, wipers, F1, F5, F6, F7, F10, ...). The car only lets
-you out at a standstill (`car_speed` ≤ 2) on the ground, in a race in the cockpit or chase view.
+On foot the driving, cockpit and replay keys do nothing (gears, wipers, F1, F5, F6, F7, F10, ...). The car lets you
+out on the ground, in a race in the cockpit or chase view.
+
+**Getting out while driving.** Up to 15 km/h (`car_speed` ≤ 20, a unit is about 0.77 km/h) the walker is
+out at once and the car stands where it was. Faster, the car brakes itself hard: the game's hard brake and about
+12 m/s² on top, the pedals and the reverse do nothing meanwhile. The walker is out once it is down to 15 km/h,
+from 70 km/h in under a second. Pressing the gas again (after letting it go) drives on instead. Before, the car had
+to stand (`car_speed` ≤ 2), and a brake held a little too long at the standstill put the reverse in (`REVERSE.md`):
+stressful in an ambush. `foot_bail_controls` in `foot.c`, called by `controls_poll`.
 
 ## How it works
 

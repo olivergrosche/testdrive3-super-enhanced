@@ -5,19 +5,22 @@ the SDL3 port by Krzysztof Kania) that turns the 1990 racer into a small open-wo
 everything upstream does:
 
 * Chase view, modern gamepad controls, widescreen (`CHASE.md`).
-* On foot: stop, get out, walk, run and jump in the first person, get back in (`FOOT.md`).
+* On foot: get out (while driving, the car brakes itself), walk, run and jump in the first person, get back in
+  (`FOOT.md`).
 * Fists and weapons: punches, a pistol, uzis and shotguns, aiming down the sights; cars shot into burning wrecks
   (`WEAPON.md`).
 * Reversing with the automatic gearbox (`REVERSE.md`).
 * Ambushes: gunmen waiting on the road, who drop their guns (`FOES.md`).
 * Civilians walking along the roads and round the buildings (`CIVS.md`).
 * Wanted levels: police chases, arrests, searches on foot, hiding; car thieves (`POLICE.md`).
-* Villages with names, a garage, gun shops, pubs and police stations; money and body armour (`TOWNS.md`).
+* Villages with names on every leg, garages, gun shops, pubs and police stations; money and body armour
+  (`TOWNS.md`).
+* Cows and horses that graze, walk about and run from the car, the walker and gunfire (`ANIMALS.md`).
 * Jobs made up at random: parcels, races, getaways and taxi fares from the pub, bounties and stolen cars from the
   police station (`TOWNS.md`).
 * Start at any section: the course selection's Left / Right choose where the race begins.
 
-Everything the fork adds is marked `OG:` in the code; `CHANGELOG.md` lists it by version (`-og1` .. `-og9`). It
+Everything the fork adds is marked `OG:` in the code; `CHANGELOG.md` lists it by version (`-og1` .. `-og10`). It
 needs the original game (version 3.0) as upstream does; the game files are not included. The port, its faithful
 engine and the enhanced renderer are upstream's work. MIT, see `LICENSE`.
 

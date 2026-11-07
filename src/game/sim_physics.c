@@ -441,7 +441,8 @@ void car_physics(void)
     /* 21. off-road timer */
     DSW(DS_offroad_frames) = (u16)(DSW(DS_offroad_frames) + 1) & 0x1FF;
     if (DSW(DS_offroad_frames) == 0x40) {
-        message_box(0x0C);                            /* "Press F6 to return to the road" */
+        /* OG: no "Press F6 to return to the road" box (message 0Ch): off the road on purpose, to a village or
+         * parked by a house, it came back every 512 frames. F6 / the pad's L3 still bring the car back. */
         DSB(DS_f6_allowed) = 1;
     }
 

@@ -3,6 +3,7 @@
 #include "game/game.h"
 #include "enhanced/enhanced.h"
 #include <stdio.h>
+#include <stdlib.h>
 
 /* PORT: the main menu renders its 3D preview unpaced in the original; game_flow.md §7 recommends the race
  * loop's rule with the original constant: at least 5 timer ticks per loop (~4.4 s per turn of the car). */
@@ -13,6 +14,15 @@ s16 main_menu(void)
 {
     u16 back_to = 1, shown = 0xff, k;
 
+    {   /* ENH developer aid: TD3_SCENE=n starts on scene n (as scene_next takes it; not written to the play disk) */
+        static bool done;
+        const char *e = getenv("TD3_SCENE");
+        s16 s = e ? (s16)atoi(e) : -1;
+        if (!done && s >= 0 && s < DSB(DS_scenes_on_disk) && s != (s16)DSW(DS_scene_index) &&
+            scene_lst_load(s, DS_path_scene, DS_scene_name) == 0)
+            DSW(DS_scene_index) = (u16)s;
+        done = true;
+    }
     playdisk_verify();
     DSB(DS_menu_preview) = 1;
     DSB(DS_external_panel_on) = 1;

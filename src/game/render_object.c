@@ -184,6 +184,7 @@ void parked_vehicles_emit(void)
     u16 old = DSW(DS_face_count);
     DSW(DS_face_count) = DSW(DS_static_face_end);
     if (DSB(DS_menu_preview) == 0) {
+        animals_update();                                       /* OG (ANIMALS.md) */
         u16 bx = (u16)(DSW(DS_obj_first_static) << 1);
         for (;;) {
             bx = (u16)(bx - 2);
@@ -215,7 +216,9 @@ void parked_vehicles_emit(void)
                 /* TODO(verify): ES is assumed preserved across the far call to 0c1c:111d (the port passes the
                  * objects set segment explicitly). */
             }
+            bool animal = animals_pose_slot(bx);                /* OG (ANIMALS.md): its legs in its pose */
             obj_emit_vehicle(bx, dx, oes);
+            if (animal) animals_unpose();
             continue;
         clear:
             DSW(DS_obj_vert_base + bx) = 0;
@@ -223,6 +226,7 @@ void parked_vehicles_emit(void)
             DSW(DS_obj_face_base + bx) = 0;
             DSW(DS_obj_face_count + bx) = 0;
         }
+        animals_emit_statics();                                 /* OG (ANIMALS.md): the cows, where they walk */
     }
     u16 cur = DSW(DS_face_count);
     DSW(DS_face_count) = old;

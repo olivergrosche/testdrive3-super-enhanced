@@ -21,7 +21,8 @@
 #define RAD2PX (1024.0 / M_PI)
 #define A2RAD  (2.0 * M_PI / 65536.0)
 
-#define NBLD 64
+#define NBLD 96
+#define NPLAN_OLD 24                    /* a hand-planned village's houses at most (village.c) */
 #define NVIL 32
 #define START_MONEY 150
 #define LEG_PRIZE   300
@@ -44,8 +45,11 @@ typedef struct {
     double ax, az, hx, hz;              /* the local x axis in the world (unit), half the extent along x and z */
     double nx, nz, half;                /* the door's side: outward, half its length */
     double dX, dZ, gX, gZ;              /* the door's marker, the garage's bay (true x4) */
-    double road;                        /* from the door to the nearest road face */
+    double road;                        /* from the door to the main road on foot (walk grid), 1e9 no way */
+    double road_air;                    /* from the door to the nearest road face, straight (the dump's) */
+    int rcell;                          /* the main road's cell the way on foot starts at, -1 none */
     int vil, sv, obj;
+    double cover, onroad;               /* the roof's share of the footprint, the road's share under it (the dump's) */
     double gy;                          /* the ground at the door (the base until seen) */
     bool gy_ok, armed, armed_car;       /* walked / driven away since the last visit */
 } Bld;
@@ -53,6 +57,7 @@ typedef struct { double X, Z; int nb, nsv; const char *name; } Vil;
 
 static Bld bld[NBLD];
 static int nbld;
+static int n_onroad;                    /* the dump's: models over the road, no houses (add_house) */
 static Vil vil[NVIL];
 static int nvil;
 static u32 scan_key = 0xFFFFFFFFu;
@@ -318,6 +323,17 @@ static int road_cell_near(double X, double Z)
     return best;
 }
 
+/* road cell c joined to the cell next to it on side e (-1: none) */
+static int road_joined(int c, int e)
+{
+    int d = cell_next(c, e);
+    if (d < 0 || !rnode[d]) return -1;
+    int back = e ^ 1;                                                    /* the same edge seen from d */
+    if (redge[c][e][0] > redge[c][e][1] || redge[d][back][0] > redge[d][back][1]) return -1;
+    if (redge[c][e][0] > redge[d][back][1] + 600 || redge[d][back][0] > redge[c][e][1] + 600) return -1;
+    return d;
+}
+
 /* the way by road from road cell a to road cell b, metres (cell to cell, 41 m a step); -1 no way */
 static double route_cells(int a, int b)
 {
@@ -330,11 +346,8 @@ static double route_cells(int a, int b)
         int c = queue[qh++];
         if (c == b) break;
         for (int e = 0; e < 4; e++) {
-            int d = cell_next(c, e);
-            if (d < 0 || !rnode[d] || dist[d] >= 0) continue;
-            int back = e ^ 1;                                            /* the same edge seen from d */
-            if (redge[c][e][0] > redge[c][e][1] || redge[d][back][0] > redge[d][back][1]) continue;
-            if (redge[c][e][0] > redge[d][back][1] + 600 || redge[d][back][0] > redge[c][e][1] + 600) continue;
+            int d = road_joined(c, e);
+            if (d < 0 || dist[d] >= 0) continue;
             dist[d] = dist[c] + 1;
             queue[qt++] = d;
         }
@@ -343,18 +356,291 @@ static double route_cells(int a, int b)
     return dist[b] * 40.96 + 20;
 }
 
-/* the way by road from (X0, Z0) to (X1, Z1) (true x4), metres; -1 no way */
-static double road_route(double X0, double Z0, double X1, double Z1)
+/* The road network's parts (cells joined by road_joined); the main road = the biggest part (the leg's course) */
+static int rcomp[512], rcomp_n, main_comp = -1, main_cells;
+
+static void road_comps(void)
 {
-    return route_cells(road_cell_near(X0, Z0), road_cell_near(X1, Z1));
+    static int size[512], queue[512];
+    rcomp_n = 0; main_comp = -1; main_cells = 0;
+    for (int c = 0; c < 512; c++) rcomp[c] = -1;
+    for (int c0 = 0; c0 < 512; c0++) {
+        if (!rnode[c0] || rcomp[c0] >= 0) continue;
+        int k = rcomp_n++, qh = 0, qt = 0;
+        size[k] = 0;
+        rcomp[c0] = k; queue[qt++] = c0;
+        while (qh < qt) {
+            int c = queue[qh++];
+            size[k]++;
+            for (int e = 0; e < 4; e++) {
+                int d = road_joined(c, e);
+                if (d < 0 || rcomp[d] >= 0) continue;
+                rcomp[d] = k;
+                queue[qt++] = d;
+            }
+        }
+        if (size[k] > main_cells) { main_cells = size[k]; main_comp = k; }
+    }
 }
 
-/* the way by road from (X, Z) to the leg's finish, metres; -1 none */
-static double to_finish(double X, double Z)
+/* ------------------------------------------------------------------------------------------------------
+ * On foot from the main road (TOWNS.md "Jobs": every goal can be reached). The leg's tiles sampled every WG
+ * units (1.28 m): at each point the highest ground face (not steep, not a zone), water (0Eh) and holes not to
+ * walk on; the walls (steep faces, type-1 lines, not the zones) block the points whose ground they meet at a
+ * body's height, as foot.c's resolve. From the main road's points the way on foot (8 neighbours, no corner cut,
+ * at most WG_DY up or down a step) to every point within WALK_MAX: its length and the road cell it starts at.
+ * A house's door counts only with such a way: no goal across a river, up a cliff or by a road of its own.
+ * ------------------------------------------------------------------------------------------------------ */
+#define WG        128.0
+#define WGX       1024                  /* 131072 / WG */
+#define WGZ       512                   /* 65536 / WG */
+#define WG_DY     160.0                 /* height units between neighbouring points (a slope's, a step's) */
+#define WG_STEP    18.0                 /* a wall lower than this over the ground is stepped onto (foot.c F_STEP) */
+#define WG_HEAD    78.0                 /* ... higher than this is over the head (foot.c F_HEIGHT) */
+#define WALK_MAX 7000.0                 /* x4 units: the search's reach (70 m) */
+static float wg_y[WGZ][WGX];            /* the ground, height units; -1e9 none */
+static u8 wg_t[WGZ][WGX];               /* its face type */
+static u8 wg_wall[WGZ][WGX];
+static float wg_d[WGZ][WGX];            /* the way on foot from the main road, x4 units; 1e9 none */
+static double walk_ms;                  /* the last walk_grid's time (the dump's) */
+static short wg_src[WGZ][WGX];          /* the road cell it starts at */
+
+/* face k of map cell c's tile: its corners (true x4; height units), type and corner count; false none */
+typedef struct { u16 es, si; int nf, nv; u8 rot; double ox, oz, oy; } TileRef;
+
+static bool tile_ref(int c, TileRef *r)
+{
+    int col = c & 31, row = c >> 5, zc = 15 - row;
+    u16 m = DSW(DS_leg_map + 2 * c);
+    if (!tile_model((u8)m, &r->es, &r->si, &r->nf, &r->nv)) return false;
+    r->rot = (u8)((m >> 8) & 0xC0);
+    r->ox = col * 4096.0 + 2048.0; r->oz = zc * 4096.0 + 2048.0; r->oy = (m & 0x3F00);
+    return true;
+}
+
+static bool tile_face(const TileRef *r, int k, double *vx, double *vy, double *vz, int *type, int *n)
+{
+    u16 stride = (u16)(r->nv * 2), f = (u16)(r->si + 4 + 3 * stride + 8 * k);
+    u16 w[4];
+    for (int j = 0; j < 4; j++) w[j] = rd16(r->es, (u16)(f + 2 * j));
+    *type = w[3] >> 11; *n = (w[0] >> 14) + 1;
+    for (int j = 0; j < *n; j++) {
+        int vi = w[j] & 0x7FF;
+        if (vi >= r->nv) return false;
+        double a = (s16)rd16(r->es, (u16)(r->si + 4 + 2 * vi)), b = (s16)rd16(r->es, (u16)(r->si + 4 + stride + 2 * vi)),
+               cc = (s16)rd16(r->es, (u16)(r->si + 4 + 2 * stride + 2 * vi)), rb = b, rc = cc;
+        if (r->rot == 0x40)      { rb = cc; rc = -b; }
+        else if (r->rot == 0x80) { rb = -b; rc = -cc; }
+        else if (r->rot == 0xC0) { rb = -cc; rc = b; }
+        vx[j] = r->ox + rb; vz[j] = r->oz + rc; vy[j] = r->oy + a;
+    }
+    return true;
+}
+
+/* steep as foot.c's (the normal's horizontal part over 1.5 times its vertical one) */
+static bool face_steep(const double *vx, const double *vy, const double *vz)
+{
+    double ux = vx[1] - vx[0], uy = vy[1] - vy[0], uz = vz[1] - vz[0];
+    double wx = vx[2] - vx[0], wy = vy[2] - vy[0], wz = vz[2] - vz[0];
+    double nx = uy * wz - uz * wy, ny = uz * wx - ux * wz, nz = ux * wy - uy * wx;
+    double h = sqrt(nx * nx + nz * nz);
+    return h > 1.5 * fabs(ny) && h > 1e-6;
+}
+
+static inline void wg_mark_wall(int gx, int gz, double ylo, double yhi)
+{
+    if (gx < 0 || gx >= WGX || gz < 0 || gz >= WGZ) return;
+    double g = wg_y[gz][gx];
+    if (g < -1e8) return;
+    if (yhi >= g + WG_STEP && ylo <= g + WG_HEAD) wg_wall[gz][gx] = 1;
+}
+
+static inline bool wg_walkable(int gx, int gz)
+{
+    return gx >= 0 && gx < WGX && gz >= 0 && gz < WGZ && wg_y[gz][gx] > -1e8f && wg_t[gz][gx] != 0x0E && !wg_wall[gz][gx];
+}
+
+/* the search's heap: (way, point), entries made stale by a shorter way are skipped when taken */
+typedef struct { float d; int i; } WgEntry;
+#define WG_HEAP (1 << 20)
+static WgEntry wg_heap[WG_HEAP];
+static int wg_heap_n;
+static bool wg_heap_full;
+
+static void wg_push(float d, int i)
+{
+    if (wg_heap_n >= WG_HEAP) { wg_heap_full = true; return; }
+    int k = wg_heap_n++;
+    while (k > 0 && wg_heap[(k - 1) / 2].d > d) { wg_heap[k] = wg_heap[(k - 1) / 2]; k = (k - 1) / 2; }
+    wg_heap[k].d = d; wg_heap[k].i = i;
+}
+
+static WgEntry wg_pop(void)
+{
+    WgEntry top = wg_heap[0], last = wg_heap[--wg_heap_n];
+    int k = 0;
+    for (;;) {
+        int l = 2 * k + 1, m = l;
+        if (l >= wg_heap_n) break;
+        if (l + 1 < wg_heap_n && wg_heap[l + 1].d < wg_heap[l].d) m = l + 1;
+        if (wg_heap[m].d >= last.d) break;
+        wg_heap[k] = wg_heap[m];
+        k = m;
+    }
+    if (wg_heap_n > 0) wg_heap[k] = last;
+    return top;
+}
+
+/* a wall's inside (a slanting cliff): the grid points under the polygon (x, z) */
+static void wg_raster(const double *vx, const double *vz, int n, double ylo, double yhi)
+{
+    double x0 = 1e18, x1 = -1e18, z0 = 1e18, z1 = -1e18;
+    for (int j = 0; j < n; j++) { x0 = fmin(x0, vx[j]); x1 = fmax(x1, vx[j]); z0 = fmin(z0, vz[j]); z1 = fmax(z1, vz[j]); }
+    int gx0 = (int)ceil(x0 / WG - 0.5), gx1 = (int)floor(x1 / WG - 0.5), gz0 = (int)ceil(z0 / WG - 0.5), gz1 = (int)floor(z1 / WG - 0.5);
+    if (gx0 < 0) gx0 = 0;
+    if (gz0 < 0) gz0 = 0;
+    if (gx1 >= WGX) gx1 = WGX - 1;
+    if (gz1 >= WGZ) gz1 = WGZ - 1;
+    for (int gz = gz0; gz <= gz1; gz++)
+        for (int gx = gx0; gx <= gx1; gx++) {
+            double X = (gx + 0.5) * WG, Z = (gz + 0.5) * WG;
+            for (int t = 0; t + 2 < n; t++) {                            /* the fan's triangles */
+                int i0 = 0, i1 = 1 + t, i2 = 2 + t;
+                double d = (vz[i1] - vz[i2]) * (vx[i0] - vx[i2]) + (vx[i2] - vx[i1]) * (vz[i0] - vz[i2]);
+                if (fabs(d) < 1e-9) continue;
+                double l0 = ((vz[i1] - vz[i2]) * (X - vx[i2]) + (vx[i2] - vx[i1]) * (Z - vz[i2])) / d;
+                double l1 = ((vz[i2] - vz[i0]) * (X - vx[i2]) + (vx[i0] - vx[i2]) * (Z - vz[i2])) / d, l2 = 1 - l0 - l1;
+                if (l0 < -1e-6 || l1 < -1e-6 || l2 < -1e-6) continue;
+                wg_mark_wall(gx, gz, ylo, yhi);
+                break;
+            }
+        }
+}
+
+static void walk_grid(void)
+{
+    for (int gz = 0; gz < WGZ; gz++)
+        for (int gx = 0; gx < WGX; gx++) { wg_y[gz][gx] = -1e9f; wg_t[gz][gx] = 0xFF; wg_wall[gz][gx] = 0; wg_d[gz][gx] = 1e9f; wg_src[gz][gx] = -1; }
+    /* the ground: the highest face at each point, its type */
+    for (int c = 0; c < 512; c++) {
+        TileRef r;
+        if (!tile_ref(c, &r)) continue;
+        for (int k = 0; k < r.nf; k++) {
+            double vx[4], vy[4], vz[4];
+            int t, n;
+            if (!tile_face(&r, k, vx, vy, vz, &t, &n) || n < 3 || t == 0 || (t >= 0x1C && t <= 0x1F)) continue;
+            if (face_steep(vx, vy, vz)) continue;
+            double x0 = 1e18, x1 = -1e18, z0 = 1e18, z1 = -1e18;
+            for (int j = 0; j < n; j++) { x0 = fmin(x0, vx[j]); x1 = fmax(x1, vx[j]); z0 = fmin(z0, vz[j]); z1 = fmax(z1, vz[j]); }
+            int gx0 = (int)fmax(0, ceil(x0 / WG - 0.5)), gx1 = (int)fmin(WGX - 1, floor(x1 / WG - 0.5));
+            int gz0 = (int)fmax(0, ceil(z0 / WG - 0.5)), gz1 = (int)fmin(WGZ - 1, floor(z1 / WG - 0.5));
+            for (int gz = gz0; gz <= gz1; gz++)
+                for (int gx = gx0; gx <= gx1; gx++) {
+                    double X = (gx + 0.5) * WG, Z = (gz + 0.5) * WG;
+                    for (int tt = 0; tt + 2 < n; tt++) {
+                        int i0 = 0, i1 = 1 + tt, i2 = 2 + tt;
+                        double d = (vz[i1] - vz[i2]) * (vx[i0] - vx[i2]) + (vx[i2] - vx[i1]) * (vz[i0] - vz[i2]);
+                        if (fabs(d) < 1e-9) continue;
+                        double l0 = ((vz[i1] - vz[i2]) * (X - vx[i2]) + (vx[i2] - vx[i1]) * (Z - vz[i2])) / d;
+                        double l1 = ((vz[i2] - vz[i0]) * (X - vx[i2]) + (vx[i0] - vx[i2]) * (Z - vz[i2])) / d, l2 = 1 - l0 - l1;
+                        if (l0 < -1e-6 || l1 < -1e-6 || l2 < -1e-6) continue;
+                        double y = l0 * vy[i0] + l1 * vy[i1] + l2 * vy[i2];
+                        if (y > wg_y[gz][gx]) { wg_y[gz][gx] = (float)y; wg_t[gz][gx] = (u8)t; }
+                        break;
+                    }
+                }
+        }
+    }
+    /* the walls: their outline every half point, their inside (a slanting cliff) */
+    for (int c = 0; c < 512; c++) {
+        TileRef r;
+        if (!tile_ref(c, &r)) continue;
+        for (int k = 0; k < r.nf; k++) {
+            double vx[4], vy[4], vz[4];
+            int t, n;
+            if (!tile_face(&r, k, vx, vy, vz, &t, &n) || t == 0 || (t >= 0x1C && t <= 0x1F)) continue;
+            if (n == 2 ? t != 1 : n < 3 || !face_steep(vx, vy, vz)) continue;
+            double ylo = 1e18, yhi = -1e18;
+            for (int j = 0; j < n; j++) { ylo = fmin(ylo, vy[j]); yhi = fmax(yhi, vy[j]); }
+            for (int j = 0; j < n; j++) {
+                int j2 = (j + 1) % n;
+                if (n == 2 && j == 1) break;
+                double ex = vx[j2] - vx[j], ez = vz[j2] - vz[j], len = sqrt(ex * ex + ez * ez);
+                int steps = (int)(len / (WG / 2)) + 1;
+                for (int s = 0; s <= steps; s++) {
+                    double u = (double)s / steps;
+                    wg_mark_wall((int)floor((vx[j] + ex * u) / WG), (int)floor((vz[j] + ez * u) / WG), ylo, yhi);
+                }
+            }
+            if (n >= 3) wg_raster(vx, vz, n, ylo, yhi);
+        }
+    }
+    /* the way on foot from the main road's points: Dijkstra over 8 neighbours, a heap with stale entries skipped */
+    wg_heap_n = 0;
+    if (main_comp < 0) return;
+    for (int gz = 0; gz < WGZ; gz++)
+        for (int gx = 0; gx < WGX; gx++) {
+            u8 t = wg_t[gz][gx];
+            if (t < 0x10 || t > 0x14 || wg_wall[gz][gx]) continue;
+            int col = (int)((gx + 0.5) * WG / 4096.0), zc = (int)((gz + 0.5) * WG / 4096.0), c = col + (15 - zc) * 32;
+            if (col > 31 || zc > 15 || rcomp[c] != main_comp) continue;
+            wg_d[gz][gx] = 0;
+            wg_src[gz][gx] = (short)c;
+            wg_push(0, gz * WGX + gx);
+        }
+    static const int dxs[8] = { 1, -1, 0, 0, 1, 1, -1, -1 }, dzs[8] = { 0, 0, 1, -1, 1, -1, 1, -1 };
+    while (wg_heap_n > 0) {
+        WgEntry top = wg_pop();
+        int gx = top.i % WGX, gz = top.i / WGX;
+        if (top.d > wg_d[gz][gx]) continue;                              /* stale */
+        float y0 = wg_y[gz][gx];
+        for (int e = 0; e < 8; e++) {
+            int nx = gx + dxs[e], nz = gz + dzs[e];
+            if (!wg_walkable(nx, nz)) continue;
+            bool diag = e >= 4;
+            if (diag && (!wg_walkable(nx, gz) || !wg_walkable(gx, nz))) continue;   /* no corner cut */
+            if (fabs(wg_y[nz][nx] - y0) > WG_DY * (diag ? 1.41 : 1.0)) continue;
+            float nd = top.d + (float)(WG * (diag ? 1.41421356 : 1.0));
+            if (nd >= wg_d[nz][nx] || nd > WALK_MAX) continue;
+            wg_d[nz][nx] = nd;
+            wg_src[nz][nx] = wg_src[gz][gx];
+            wg_push(nd, nz * WGX + nx);
+        }
+    }
+}
+
+/* the way on foot from the main road to (X, Z) (true x4; the best point within 1.3 m), 1e9 none; its road cell */
+static double walk_at(double X, double Z, int *cell)
+{
+    int gx = (int)floor(X / WG), gz = (int)floor(Z / WG);
+    double best = 1e9;
+    if (cell) *cell = -1;
+    for (int a = -1; a <= 1; a++)
+        for (int b = -1; b <= 1; b++) {
+            int x = gx + a, z = gz + b;
+            if (x < 0 || x >= WGX || z < 0 || z >= WGZ) continue;
+            double d = wg_d[z][x] + ((a || b) ? WG : 0);
+            if (wg_d[z][x] < 1e8f && d < best) { best = d; if (cell) *cell = wg_src[z][x]; }
+        }
+    return best;
+}
+
+static bool inside(const Bld *b, double X, double Z, double grow);
+bool enh_town_house_at(double X, double Z, double grow)
+{
+    for (int i = 0; i < nbld; i++) if (inside(&bld[i], X, Z, grow)) return true;
+    return false;
+}
+
+/* a goal for a job: its door at most 40 m on foot from the main road (TOWNS.md "Jobs") */
+static bool house_reachable(int i) { return i >= 0 && i < nbld && bld[i].road <= 4000 && bld[i].rcell >= 0; }
+
+/* the way by road from road cell c to the leg's finish, metres; -1 none */
+static double to_finish(int c)
 {
     int f = finish_cell >= 0 && !rnode[finish_cell] ? road_cell_near((finish_cell & 31) * 4096.0 + 2048.0,
                                                                      (15 - (finish_cell >> 5)) * 4096.0 + 2048.0) : finish_cell;
-    return route_cells(road_cell_near(X, Z), f);
+    return route_cells(c, f);
 }
 
 /* the point (X, Z) inside a house's footprint (grown by `grow`)? */
@@ -387,14 +673,27 @@ static void add_house(int m, bool stat, double ox, double oz, double oy, u8 rot,
     bool used[256];
     memset(used, 0, sizeof used);
     int solid = 0;
+    double flat = 0;                                                     /* the solid faces' area seen from above */
     u16 fa = (u16)(a + 3 * stride);
     for (int k = 0; k < nf; k++, fa = (u16)(fa + 8)) {
         u16 w0 = rd16(es, fa);
         if ((rd16(es, (u16)(fa + 6)) >> 11) != 1) continue;
         solid++;
-        for (int j = 0; j < (w0 >> 14) + 1; j++) {
+        int nvf = (w0 >> 14) + 1;
+        double px[4], pz[4];
+        bool ok = true;
+        for (int j = 0; j < nvf; j++) {
             int vi = rd16(es, (u16)(fa + 2 * j)) & 0x7FF;
-            if (vi < nv && vi < 256) used[vi] = true;
+            if (vi < nv && vi < 256) {
+                used[vi] = true;
+                px[j] = (s16)rd16(es, (u16)(a + stride + 2 * vi));
+                pz[j] = (s16)rd16(es, (u16)(a + 2 * stride + 2 * vi));
+            } else ok = false;
+        }
+        if (ok && nvf >= 3) {
+            double ar = 0;
+            for (int j = 0; j < nvf; j++) ar += px[j] * pz[(j + 1) % nvf] - px[(j + 1) % nvf] * pz[j];
+            flat += fabs(ar) / 2;
         }
     }
     if (solid < 4) return;
@@ -407,6 +706,9 @@ static void add_house(int m, bool stat, double ox, double oz, double oy, u8 rot,
     }
     double w = x1 - x0, d = z1 - z0, ht = h1 - h0;
     if (fmin(w, d) < 180 || w * d < 60000 || ht < 90 || fmax(w, d) > 2500) return;
+    /* a tower, not a house: higher than 2.5 times its narrow side (a height unit is 2.33 x4 units): the power
+     * line's pylons on Cape Cod's fourth leg (model 27, 2.6 m wide, 12 m high) were a "village" with shops */
+    if (ht * 2.33 > 2.5 * fmin(w, d)) return;
     double phi = rot * (2.0 * M_PI / 256.0), cs = cos(phi), sn = sin(phi);
     double cx = (x0 + x1) / 2, cz = (z0 + z1) / 2;
     Bld *b = &bld[nbld++];
@@ -422,12 +724,317 @@ static void add_house(int m, bool stat, double ox, double oz, double oy, u8 rot,
     b->vil = -1;
     b->sv = sv;
     b->armed = b->armed_car = true;
+    b->cover = flat / (w * d);
+    int n = 0, r = 0;                                                    /* the walk grid's points under it */
+    double ext = hypot(b->hx, b->hz);
+    for (int gz = (int)floor((b->Z - ext) / WG); gz <= (int)floor((b->Z + ext) / WG); gz++)
+        for (int gx = (int)floor((b->X - ext) / WG); gx <= (int)floor((b->X + ext) / WG); gx++) {
+            if (gx < 0 || gx >= WGX || gz < 0 || gz >= WGZ || !inside(b, gx * (double)WG, gz * (double)WG, -32)) continue;
+            n++;
+            if (wg_t[gz][gx] >= 0x10 && wg_t[gz][gx] <= 0x14) r++;
+        }
+    b->onroad = n ? (double)r / n : 0;
+    /* nothing over the road is a house: the traffic lights' gantry over the crossroads (model 5, 8.5 m square, 1.5
+     * to 1.8 m "high" by its solid faces: the posts and the beam) stood on the road on eight of the ten legs and, by
+     * the road, was a pub, a gun shop, a garage or a police station sixteen times (2026-11-07, Cape Cod - Niagara's
+     * fifth leg: the garage's sign over the lights, its ring on the crossroads). The road under the houses: 0 on
+     * every leg, under the gantry 0.90 to 0.98 */
+    if (b->onroad > 0.25) { nbld--; n_onroad++; }
+}
+
+/* ------------------------------------------------------------------------------------------------------
+ * More villages (TOWNS.md "More villages"): at a leg's start, houses of the leg's own models are planned along the
+ * main road where it runs straight, east-west or north-south (the statics turn by quarter turns), on level open
+ * ground on both sides, their fronts to the road, as PILGRIM COVE was planned by hand. game/village.c places them
+ * (level ground only) and the game builds them as its own. At most three villages a leg, 300 m apart (a hamlet of
+ * the leg's own may grow), the most houses first, then the nearer to the start.
+ * ------------------------------------------------------------------------------------------------------ */
+typedef struct { u8 model; bool parked; double fx, fz; } HouseKind;   /* its front: a unit vector in its own frame */
+static const HouseKind kinds_ne[] = {                                /* Cape Cod - Niagara: the fronts as PILGRIM COVE's */
+    { 55, true, 0, -1 }, { 54, false, 0, -1 }, { 50, true, 1, 0 }, { 54, false, 0, -1 }, { 55, true, 0, -1 }, { 51, false, 1, 0 },
+};
+static const HouseKind kinds_w[] = {                                 /* Pacific - Yosemite: as the leg's own face the road */
+    { 52, true, 1, 0 }, { 53, true, 1, 0 }, { 54, false, 0, -1 }, { 52, true, 1, 0 }, { 51, true, 0, 1 }, { 53, true, 1, 0 },
+};
+#define PV_SETBACK  350.0               /* from the road's edge to the front */
+#define PV_RUN     3200.0               /* a straight stretch at least this long (32 m) */
+#define PV_SPAN    8000.0               /* a village at most this long along the road */
+#define PV_MAXH       7
+#define PV_CELLV    420                 /* added houses' vertices in one map cell (PILGRIM COVE's fullest: 446) */
+#define PV_APART  30000.0               /* from the other planned villages (a leg's own hamlet may grow) */
+#define PV_VILLAGES   3
+
+/* what a planned house may not stand on: every object of the leg (a church, its tower, a pylon, a boat: not only
+ * the houses), 1.5 m round it, and every sprite (the tiles' trees, rocks, signs; the leg's own): its trunk */
+static u8 pv_blocked[WGZ][WGX];
+
+static void pv_block_rect(double X, double Z, double ax, double az, double hx, double hz, double margin)
+{
+    double r = hypot(hx, hz) + margin;
+    for (int gz = (int)floor((Z - r) / WG); gz <= (int)floor((Z + r) / WG); gz++)
+        for (int gx = (int)floor((X - r) / WG); gx <= (int)floor((X + r) / WG); gx++) {
+            if (gx < 0 || gx >= WGX || gz < 0 || gz >= WGZ) continue;
+            double qx = (gx + 0.5) * WG - X, qz = (gz + 0.5) * WG - Z;
+            double lx = qx * ax + qz * az, lz = -qx * az + qz * ax;
+            if (fabs(lx) <= hx + margin && fabs(lz) <= hz + margin) pv_blocked[gz][gx] = 1;
+        }
+}
+
+static void pv_obstacles(void)
+{
+    memset(pv_blocked, 0, sizeof pv_blocked);
+    u16 es = DSW(DS_objects_set + 2), set = DSW(DS_objects_set);
+    int first = DSW(DS_obj_first_static), n = DSW(DS_obj_count);
+    for (int o = 1; o < n && o < 160 && es; o++) {
+        u16 f = DSW(DS_obj_flags + 2 * o);
+        bool stat = o >= first, parked = !stat && (f & 0x3000) == 0x1000;
+        if (!stat && !parked) continue;
+        int m = f & 0x3F;
+        if (m <= 3) continue;
+        u16 p = (u16)(rd16(es, (u16)(set + 2 * m)) + set);
+        int nv = rd8(es, (u16)(p + 1));
+        u16 a = (u16)(p + (stat ? 4 : 8)), stride = (u16)(nv * 2);
+        double x0 = 1e9, x1 = -1e9, z0 = 1e9, z1 = -1e9;
+        for (int k = 0; k < nv; k++) {
+            double x = (s16)rd16(es, (u16)(a + stride + 2 * k)), z = (s16)rd16(es, (u16)(a + 2 * stride + 2 * k));
+            x0 = fmin(x0, x); x1 = fmax(x1, x); z0 = fmin(z0, z); z1 = fmax(z1, z);
+        }
+        if (x0 > x1) continue;
+        u8 rot = (u8)(DSW(DS_obj_heading + 2 * o) >> 8);
+        if (stat) rot &= 0xC0;
+        double phi = rot * (2.0 * M_PI / 256.0), cs = cos(phi), sn = sin(phi), cx = (x0 + x1) / 2, cz = (z0 + z1) / 2;
+        double ox = DSW(DS_obj_x + 2 * o) * 4.0, oz = DSW(DS_obj_z + 2 * o) * 4.0;
+        pv_block_rect(ox + cx * cs + cz * sn, oz - cx * sn + cz * cs, cs, -sn, (x1 - x0) / 2, (z1 - z0) / 2, 150);
+    }
+    /* the leg's own sprites (9 ..: trees, rocks, animals) */
+    for (int i = 9; i < DSW(DS_sprite_count) && i < 320; i++)
+        if (DSW(DS_sprite_id + 2 * i))
+            pv_block_rect(DSW(DS_sprite_x + 2 * i) * 4.0, DSW(DS_sprite_z + 2 * i) * 4.0, 1, 0, 70, 70, 0);
+    /* the tiles' sprite children, thinned by the vegetation seed as the game does (enh_far.c children) */
+    for (int c = 0; c < 512; c++) {
+        TileRef r;
+        if (!tile_ref(c, &r)) continue;
+        int nc = rd8(r.es, (u16)(r.si + 2));
+        u16 q = (u16)(r.si + 4 + rd8(r.es, r.si) * 8 + rd8(r.es, (u16)(r.si + 1)) * 6);
+        int col = c & 31, zc = 15 - (c >> 5);
+        u16 px = (u16)((col * 4 + 2) << 8), pz = (u16)((zc * 4 + 2) << 8);
+        u16 di = DSW(DS_veg_seed);
+        u8 cnt = (u8)((u16)(px + pz) >> 12);
+        if (cnt) di = (u16)((di << cnt) | (di >> (16 - cnt)));
+        for (int k = 0; k < nc; k++, q = (u16)(q + 8)) {
+            u16 id = rd16(r.es, q);
+            if ((u8)id >= 0x12) {
+                u16 carry = di & 1;
+                di = (u16)((di >> 1) | (carry << 15));
+                if (!carry) continue;
+            }
+            if (!id) continue;
+            s16 x = (s16)rd16(r.es, (u16)(q + 2)), z = (s16)rd16(r.es, (u16)(q + 4)), t;
+            if (r.rot == 0x40)      { t = x; x = z; z = (s16)-t; }
+            else if (r.rot == 0x80) { x = (s16)-x; z = (s16)-z; }
+            else if (r.rot == 0xC0) { t = x; x = (s16)-z; z = t; }
+            pv_block_rect((px + x) * 4.0, (pz + z) * 4.0, 1, 0, 70, 70, 0);
+        }
+    }
+}
+
+static bool pv_main_road(int gx, int gz)
+{
+    return gx >= 0 && gx < WGX && gz >= 0 && gz < WGZ && wg_d[gz][gx] == 0 && wg_t[gz][gx] >= 0x10 && wg_t[gz][gx] <= 0x14;
+}
+
+/* the footprint (true x4: middle, half extents along x and z) on level open ground: no water, road, wall or hole
+ * under it or 1.5 m round it, the ground within SLOPE (village.c's 12 height units) */
+static bool pv_open(double X, double Z, double ex, double ez)
+{
+    double lo = 1e18, hi = -1e18;
+    for (int gz = (int)floor((Z - ez - 150) / WG); gz <= (int)floor((Z + ez + 150) / WG); gz++)
+        for (int gx = (int)floor((X - ex - 150) / WG); gx <= (int)floor((X + ex + 150) / WG); gx++) {
+            if (gx < 0 || gx >= WGX || gz < 0 || gz >= WGZ) return false;
+            u8 t = wg_t[gz][gx];
+            if (wg_y[gz][gx] < -1e8f || wg_wall[gz][gx] || t == 0x0E || (t >= 0x10 && t <= 0x14)) return false;
+            double qx = (gx + 0.5) * WG - X, qz = (gz + 0.5) * WG - Z;
+            if (pv_blocked[gz][gx] && fabs(qx) <= ex + 64 && fabs(qz) <= ez + 64) return false;   /* under the house */
+            lo = fmin(lo, wg_y[gz][gx]); hi = fmax(hi, wg_y[gz][gx]);
+        }
+    return hi - lo <= 10.0;
+}
+
+typedef struct { VillageAuto h[PV_MAXH]; double ex[PV_MAXH], ez[PV_MAXH]; int nv[PV_MAXH]; int n; double X, Z; } PvVillage;
+
+static void plan_villages(void)
+{
+    village_set_auto(NULL, 0);
+    pv_obstacles();
+    bool ne = DSW(DS_scene_index) == 1;
+    const HouseKind *kinds = ne ? kinds_ne : kinds_w;
+    int nk = ne ? (int)(sizeof kinds_ne / sizeof kinds_ne[0]) : (int)(sizeof kinds_w / sizeof kinds_w[0]);
+    /* what is there already: the leg's own houses and a hand-planned village */
+    double ox[NBLD + NPLAN_OLD], oz[NBLD + NPLAN_OLD], oe[NBLD + NPLAN_OLD];
+    int no = 0;
+    for (int i = 0; i < nbld; i++) { ox[no] = bld[i].X; oz[no] = bld[i].Z; oe[no] = fmax(bld[i].hx, bld[i].hz); no++; }
+    for (int i = 0, vn = village_count(); i < vn && no < NBLD + NPLAN_OLD; i++) {
+        const VillageHouse *h = village_house(i);
+        ox[no] = h->px * 4.0; oz[no] = h->pz * 4.0; oe[no] = 600; no++;
+    }
+    double sx = (u32)DSL(DS_pos_x) / 32.0, sz = (u32)DSL(DS_pos_z) / 32.0;   /* the start (the car) */
+    static PvVillage cand[96];
+    int nc = 0;
+    /* the straight stretches: along x (a = 0) and along z (a = 1), the road's band across at each point */
+    for (int a = 0; a < 2; a++) {
+        int U = a ? WGZ : WGX, V = a ? WGX : WGZ;
+        int run_u0 = -1, run_v0 = 0;
+        double run_c[1024], run_w[1024];
+        int run_n = 0;
+        for (int u = 0; u <= U; u++) {
+            /* the band nearest the run's line (or the first one) at u */
+            double c = -1, w = 0;
+            if (u < U) {
+                int want = run_u0 >= 0 ? (int)run_c[run_n - 1] : -1;
+                double bestd = 1e9;
+                for (int v = 0; v < V; v++) {
+                    if (!(a ? pv_main_road(v, u) : pv_main_road(u, v))) continue;
+                    int v1 = v;
+                    while (v1 + 1 < V && (a ? pv_main_road(v1 + 1, u) : pv_main_road(u, v1 + 1))) v1++;
+                    int bw = v1 - v + 1;
+                    double bc = (v + v1) / 2.0;
+                    if (bw >= 3 && bw <= 10) {
+                        double d = want < 0 ? 0 : fabs(bc - want);
+                        if (d < bestd) { bestd = d; c = bc; w = bw; }
+                    }
+                    v = v1;
+                }
+                if (run_u0 >= 0 && (c < 0 || fabs(c - run_c[run_n - 1]) > 1.0 || fabs(c - run_c[0]) > 3.0)) c = c < 0 ? -1 : -2;
+            }
+            if (c >= 0 && run_u0 >= 0 && run_n < 1024) { run_c[run_n] = c; run_w[run_n] = w; run_n++; continue; }
+            /* the run ends: houses along it */
+            if (run_u0 >= 0 && run_n * WG >= PV_RUN) {
+                PvVillage *pv = &cand[nc];
+                memset(pv, 0, sizeof *pv);
+                int k = (int)((run_u0 * 7 + run_v0 * 13) % nk);
+                for (int side = -1; side <= 1; side += 2) {
+                    double along = 400;                                  /* from the run's start (x4) */
+                    while (along < run_n * WG - 400 && pv->n < PV_MAXH) {
+                        const HouseKind *hk = &kinds[k % nk];
+                        double hx, hz;
+                        int nv;
+                        if (!village_model_size(hk->model, hk->parked, &hx, &hz, &nv)) { k++; along += 300; continue; }
+                        /* the turn that puts the front to the road: front (world) across the road towards it */
+                        double wfx = a ? -side : 0, wfz = a ? 0 : -side;
+                        u8 rot = 0;
+                        for (int q = 0; q < 4; q++) {
+                            double ph = q * M_PI / 2, cs = cos(ph), sn = sin(ph);
+                            double rx = hk->fx * cs + hk->fz * sn, rz = -hk->fx * sn + hk->fz * cs;
+                            if (fabs(rx - wfx) < 0.1 && fabs(rz - wfz) < 0.1) { rot = (u8)(q * 64); break; }
+                        }
+                        double ex = (rot == 0 || rot == 128) ? hx : hz, ez = (rot == 0 || rot == 128) ? hz : hx;
+                        double e_along = a ? ez : ex, e_across = a ? ex : ez;
+                        int iu = (int)((along + e_along) / WG);
+                        if (iu >= run_n) break;
+                        double cu = (run_u0 + iu + 0.5) * WG, cv = (run_c[iu] + 0.5) * WG;
+                        double across = cv + side * (run_w[iu] * WG / 2 + PV_SETBACK + e_across);
+                        double X = a ? across : (run_u0 * WG + along + e_along), Z = a ? (run_u0 * WG + along + e_along) : across;
+                        (void)cu;
+                        bool ok = pv_open(X, Z, ex, ez) && hypot(X - sx, Z - sz) > 3000;
+                        for (int i = 0; i < no && ok; i++) if (hypot(X - ox[i], Z - oz[i]) < oe[i] + fmax(ex, ez) + 400) ok = false;
+                        for (int i = 0; i < pv->n && ok; i++)
+                            if (fabs(X - pv->h[i].x) < ex + pv->ex[i] + 300 && fabs(Z - pv->h[i].z) < ez + pv->ez[i] + 300) ok = false;
+                        if (!ok) { along += 200; continue; }
+                        VillageAuto *h = &pv->h[pv->n];
+                        h->model = hk->model; h->parked = hk->parked; h->x = X; h->z = Z; h->rot = rot;
+                        pv->ex[pv->n] = ex; pv->ez[pv->n] = ez; pv->nv[pv->n] = nv;
+                        pv->n++;
+                        k++;
+                        along += 2 * e_along + 450 + 250 * ((k * 5) % 3);
+                    }
+                }
+                if (pv->n >= 3 && nc < 96) {
+                    /* at most PV_SPAN along the road: the fullest window */
+                    double mx = 0, mz = 0;
+                    for (int i = 0; i < pv->n; i++) { mx += pv->h[i].x; mz += pv->h[i].z; }
+                    pv->X = mx / pv->n; pv->Z = mz / pv->n;
+                    int keep = 0;
+                    for (int i = 0; i < pv->n; i++)
+                        if (fabs((a ? pv->h[i].z - pv->Z : pv->h[i].x - pv->X)) <= PV_SPAN / 2) {
+                            pv->h[keep] = pv->h[i]; pv->ex[keep] = pv->ex[i]; pv->ez[keep] = pv->ez[i]; pv->nv[keep] = pv->nv[i]; keep++;
+                        }
+                    pv->n = keep;
+                    if (pv->n >= 3) nc++;
+                    if (SDL_getenv("TD3_TOWN_DUMP") && pv->n >= 3)
+                        fprintf(stderr, "town: stretch %s at %.0f %.0f, %d m: room for %d houses\n", a ? "N-S" : "E-W", pv->X, pv->Z,
+                                (int)(run_n * WG / 100), pv->n);
+                }
+            }
+            run_u0 = -1;
+            run_n = 0;
+            if (c >= 0 || c == -2) {                                     /* a new run from here */
+                if (c == -2) {
+                    /* the band that broke the run starts the next: find it again without a line */
+                    double bc = -1, bw = 0;
+                    for (int v = 0; v < V; v++) {
+                        if (!(a ? pv_main_road(v, u) : pv_main_road(u, v))) continue;
+                        int v1 = v;
+                        while (v1 + 1 < V && (a ? pv_main_road(v1 + 1, u) : pv_main_road(u, v1 + 1))) v1++;
+                        if (v1 - v + 1 >= 3 && v1 - v + 1 <= 10) { bc = (v + v1) / 2.0; bw = v1 - v + 1; break; }
+                        v = v1;
+                    }
+                    c = bc; w = bw;
+                }
+                if (c >= 0) { run_u0 = u; run_v0 = (int)c; run_c[0] = c; run_w[0] = w; run_n = 1; }
+            }
+        }
+    }
+    /* the villages: the most houses first, then the nearest the start; apart from what is there and each other */
+    VillageAuto out[2 * PV_MAXH];
+    int nout = 0, nvill = 0;
+    static int cellv[512];
+    memset(cellv, 0, sizeof cellv);
+    for (int i = 0, vn = village_count(); i < vn; i++) {                 /* a hand-planned village's vertices */
+        const VillageHouse *h = village_house(i);
+        double hx, hz;
+        int nv, c = (int)(h->px * 4.0 / 4096) + (15 - (int)(h->pz * 4.0 / 4096)) * 32;
+        if (c >= 0 && c < 512 && village_model_size(h->model, h->parked, &hx, &hz, &nv)) cellv[c] += nv;
+    }
+    bool used[96] = { false };
+    while (nvill < PV_VILLAGES) {
+        int best = -1;
+        for (int i = 0; i < nc; i++) {
+            if (used[i]) continue;
+            bool far_ok = true;
+            for (int j = 0; j < nout && far_ok; j++) if (hypot(cand[i].X - out[j].x, cand[i].Z - out[j].z) < PV_APART) far_ok = false;
+            if (!far_ok) { used[i] = true; continue; }
+            if (best < 0 || cand[i].n > cand[best].n ||
+                (cand[i].n == cand[best].n && hypot(cand[i].X - sx, cand[i].Z - sz) < hypot(cand[best].X - sx, cand[best].Z - sz)))
+                best = i;
+        }
+        if (best < 0) break;
+        used[best] = true;
+        int took = 0;
+        for (int i = 0; i < cand[best].n; i++) {
+            const VillageAuto *h = &cand[best].h[i];
+            int c = (int)(h->x / 4096) + (15 - (int)(h->z / 4096)) * 32;
+            if (c < 0 || c >= 512 || cellv[c] + cand[best].nv[i] > PV_CELLV) continue;
+            cellv[c] += cand[best].nv[i];
+            out[nout++] = *h;
+            took++;
+        }
+        if (SDL_getenv("TD3_TOWN_DUMP"))
+            fprintf(stderr, "town: planned village at %.0f %.0f (cell %.1f,%.1f): %d of %d houses\n", cand[best].X, cand[best].Z,
+                    cand[best].X / 4096.0, 16 - cand[best].Z / 4096.0, took, cand[best].n);
+        if (took) nvill++;
+    }
+    if (SDL_getenv("TD3_TOWN_DUMP")) fprintf(stderr, "town: %d straight stretches with room for a village\n", nc);
+    village_set_auto(out, nout);
 }
 
 static void scan(void)
 {
-    nbld = nvil = 0;
+    nbld = nvil = n_onroad = 0;
     road_net();
+    road_comps();
+    u64 t0 = SDL_GetTicksNS();
+    walk_grid();
+    walk_ms = (SDL_GetTicksNS() - t0) / 1e6;
     u16 es = DSW(DS_objects_set + 2);
     if (!es) return;
     int first = DSW(DS_obj_first_static), n = DSW(DS_obj_count);
@@ -444,6 +1051,7 @@ static void scan(void)
         if (stat) rot &= 0xC0;
         add_house(m, stat, DSW(DS_obj_x + 2 * o) * 4.0, DSW(DS_obj_z + 2 * o) * 4.0, DSW(DS_obj_y8 + 2 * o) >> 3, rot, o, SV_NONE);
     }
+    if (!SDL_getenv("TD3_NO_VILLAGE")) plan_villages();                 /* OG: more villages */
     /* the planned services in the leg's own houses: the house nearest the place (within 10 m) */
     for (int t = 0; ; t++) {
         double tx, tz;
@@ -462,7 +1070,8 @@ static void scan(void)
         const VillageHouse *h = village_house(i);
         add_house(h->model, !h->parked, h->px * 4.0, h->pz * 4.0, h->py, h->rot, -1, h->sv);
     }
-    /* the door: on the side nearest a road (not into another house) */
+    /* the door: on the side with the shortest way on foot from the main road (not into another house); a house
+     * with no way to any side keeps the side nearest a road, its road 1e9: no service, no job goes there */
     for (int i = 0; i < nbld; i++) {
         Bld *b = &bld[i];
         double zx = -b->az, zz = b->ax;                                  /* local z (sn, cs) */
@@ -473,12 +1082,15 @@ static void scan(void)
             double ext = s < 2 ? b->hx : b->hz, half = s < 2 ? b->hz : b->hx;
             double mx = b->X + nx * ext, mz = b->Z + nz * ext;
             double dX = mx + nx * DOOR_OUT, dZ = mz + nz * DOOR_OUT;
-            double r = road_dist(dX, dZ), score = r;
-            for (int j = 0; j < nbld; j++) if (j != i && inside(&bld[j], dX, dZ, 150)) score += 1e7;
+            int cell;
+            double air = road_dist(dX, dZ), walk = walk_at(dX, dZ, &cell);
+            double score = walk < 1e8 ? walk : 1e8 + air;
+            for (int j = 0; j < nbld; j++) if (j != i && inside(&bld[j], dX, dZ, 150)) score += 1e10;
             if (half < 90) score += 5000;                                /* a narrow end: no door there */
             if (score < best) {
                 best = score;
-                b->nx = nx; b->nz = nz; b->half = half; b->road = r;
+                b->nx = nx; b->nz = nz; b->half = half;
+                b->road = walk; b->road_air = air; b->rcell = cell;
                 b->dX = dX; b->dZ = dZ;
                 b->gX = mx + nx * BAY_OUT; b->gZ = mz + nz * BAY_OUT;
             }
@@ -617,16 +1229,26 @@ static void town_map(const char *path)
             }
         }
     }
-    for (int i = 0; i < nbld; i++) {                                     /* the houses */
+    for (int yy = 0; yy < H; yy++)                                       /* on foot from the main road: lighter */
+        for (int xx = 0; xx < W; xx++) {                                 /* (walls black) */
+            int gx = (int)((xx + 0.5) * U / WG), gz = (int)((H - yy - 0.5) * U / WG);
+            if (gx >= WGX || gz >= WGZ) continue;
+            size_t i = (size_t)yy * W + xx;
+            if (wg_wall[gz][gx]) { img[3 * i] = img[3 * i + 1] = img[3 * i + 2] = 0; continue; }
+            if (wg_d[gz][gx] < 1e8f)
+                for (int ch = 0; ch < 3; ch++) img[3 * i + ch] = (u8)(img[3 * i + ch] + (255 - img[3 * i + ch]) * 0.35);
+        }
+    for (int i = 0; i < nbld; i++) {                                     /* the houses (no goal: magenta) */
         const Bld *b = &bld[i];
         double zx = -b->az, zz = b->ax;
+        bool goal = house_reachable(i);
         for (double u = -b->hx; u <= b->hx; u += U / 2.0)
             for (double v = -b->hz; v <= b->hz; v += U / 2.0) {
                 double X = b->X + b->ax * u + zx * v, Z = b->Z + b->az * u + zz * v;
                 int xx = (int)(X / U), yy = (int)(H - Z / U);
                 if (xx < 0 || yy < 0 || xx >= W || yy >= H) continue;
                 size_t k = (size_t)yy * W + xx;
-                img[3 * k] = 200; img[3 * k + 1] = 40; img[3 * k + 2] = 40;
+                img[3 * k] = goal ? 200 : 230; img[3 * k + 1] = 40; img[3 * k + 2] = goal ? 40 : 230;
             }
         for (int d = -3; d <= 3; d++) {
             int xx = (int)(b->dX / U) + d, yy = (int)(H - b->dZ / U);
@@ -683,13 +1305,58 @@ static void town_flat(const char *spec)
     }
 }
 
+/* developer aid TD3_WG_DUMP=x0,z0,x1,z1 (true x4): the walk grid there, a point a character: '=' road, '.' ground,
+ * '~' water, '#' wall, ' ' no ground; upper case / '*' within reach of the main road; then the heights in tens */
+static void wg_dump(const char *spec)
+{
+    double x0, z0, x1, z1;
+    if (sscanf(spec, "%lf,%lf,%lf,%lf", &x0, &z0, &x1, &z1) != 4) return;
+    int gx0 = (int)(x0 / WG), gx1 = (int)(x1 / WG), gz0 = (int)(z0 / WG), gz1 = (int)(z1 / WG);
+    fprintf(stderr, "wg: x %d .. %d, z %d (top) .. %d\n", gx0, gx1, gz1, gz0);
+    for (int pass = 0; pass < 2; pass++)
+        for (int gz = gz1; gz >= gz0; gz--) {
+            char line[600];
+            int n = 0;
+            for (int gx = gx0; gx <= gx1 && n < 590; gx++) {
+                if (gx < 0 || gx >= WGX || gz < 0 || gz >= WGZ) { line[n++] = '?'; continue; }
+                bool in = wg_d[gz][gx] < 1e8f;
+                u8 t = wg_t[gz][gx];
+                if (pass == 1) {                                         /* the height in tens: three digits */
+                    if (wg_y[gz][gx] < -1e8) { line[n++] = ' '; line[n++] = ' '; line[n++] = ' '; line[n++] = ' '; continue; }
+                    n += snprintf(line + n, 8, "%3d ", ((int)(wg_y[gz][gx] / 10) % 1000 + 1000) % 1000);
+                    continue;
+                }
+                char ch = wg_y[gz][gx] < -1e8 ? ' ' : wg_wall[gz][gx] ? '#' : t == 0x0E ? '~' : (t >= 0x10 && t <= 0x14) ? (in ? 'R' : '=') : (in ? '*' : '.');
+                line[n++] = ch;
+            }
+            line[n] = 0;
+            fprintf(stderr, "wg%c %4d %s\n", pass ? 'h' : ':', gz, line);
+        }
+}
+
 void enh_town_dump(void)
 {
     const char *flat = SDL_getenv("TD3_TOWN_FLAT");
     if (flat) town_flat(flat);
+    const char *wgd = SDL_getenv("TD3_WG_DUMP");
+    if (wgd) wg_dump(wgd);
     const char *map_path = SDL_getenv("TD3_TOWN_MAP");
     if (map_path) town_map(map_path);
-    fprintf(stderr, "town: scene %d leg %d: %d houses, %d villages\n", DSW(DS_scene_index), DSB(DS_leg_index), nbld, nvil);
+    fprintf(stderr, "town: scene %d leg %d: %d houses (%d over the road are none), %d villages\n", DSW(DS_scene_index),
+            DSB(DS_leg_index), nbld, n_onroad, nvil);
+    {
+        int cells = 0, reach = 0, goals = 0;
+        for (int c = 0; c < 512; c++) cells += rnode[c];
+        for (int gz = 0; gz < WGZ; gz++) for (int gx = 0; gx < WGX; gx++) reach += wg_d[gz][gx] < 1e8f;
+        for (int i = 0; i < nbld; i++) goals += house_reachable(i);
+        int sc = road_cell_near((u32)DSL(DS_pos_x) / 32.0, (u32)DSL(DS_pos_z) / 32.0);
+        int fc = finish_cell >= 0 && !rnode[finish_cell] ? road_cell_near((finish_cell & 31) * 4096.0 + 2048.0,
+                                                                          (15 - (finish_cell >> 5)) * 4096.0 + 2048.0) : finish_cell;
+        fprintf(stderr, "town: roads %d cells in %d parts, the main road %d cells (start %s, finish %s); on foot %d points "
+                "(%.0f%%, %.0f ms)%s; %d of %d houses reachable\n", cells, rcomp_n, main_cells,
+                sc >= 0 && rcomp[sc] == main_comp ? "on it" : "OFF IT", fc >= 0 && rcomp[fc] == main_comp ? "on it" : "OFF IT",
+                reach, 100.0 * reach / (WGX * WGZ), walk_ms, wg_heap_full ? " (heap full)" : "", goals, nbld);
+    }
     for (int v = 0; v < nvil; v++)
         fprintf(stderr, "  village %d %-16s %d houses, %d services, at cell %.1f,%.1f\n", v, vil[v].name, vil[v].nb,
                 vil[v].nsv, vil[v].X / 4096.0, 15 - vil[v].Z / 4096.0 + 1);
@@ -700,8 +1367,68 @@ void enh_town_dump(void)
         double lx = b->nx * b->ax + b->nz * b->az, lz = b->nx * -b->az + b->nz * b->ax;
         const char *side = fabs(lx) > fabs(lz) ? (lx > 0 ? "+x" : "-x") : (lz > 0 ? "+z" : "-z");
         fprintf(stderr, "  house %2d obj %3d model %2d rot %3d village %2d %-7s %4.0f x %4.0f h %3.0f at %6.0f %6.0f y %4.0f; "
-                "door %6.0f %6.0f (local %s), road %5.0f\n", i, b->obj, fl & 0x3F, b->obj > 0 ? DSW(DS_obj_heading + 2 * b->obj) >> 8 : 0,
-                b->vil, sv_name[b->sv], 2 * b->hx, 2 * b->hz, b->top, b->X, b->Z, b->y, b->dX, b->dZ, side, b->road);
+                "door %6.0f %6.0f (local %s), road %5.0f straight, on foot %s%5.0f%s; roof %.2f, road under %.2f\n", i, b->obj, fl & 0x3F,
+                b->obj > 0 ? DSW(DS_obj_heading + 2 * b->obj) >> 8 : 0, b->vil, sv_name[b->sv], 2 * b->hx, 2 * b->hz, b->top,
+                b->X, b->Z, b->y, b->dX, b->dZ, side, b->road_air, b->road < 1e8 ? "" : "none ", b->road < 1e8 ? b->road : 0.0,
+                house_reachable(i) ? "" : b->road_air <= 4000 ? "  << NO GOAL (was one)" : "  (no goal)", b->cover, b->onroad);
+    }
+    if (SDL_getenv("TD3_MODEL_DUMP")) {                                 /* TD3_MODEL_DUMP=m[,s]: a model's vertices and faces */
+        const char *md = SDL_getenv("TD3_MODEL_DUMP");
+        int m = SDL_atoi(md), stat = strchr(md, 's') != NULL;
+        u16 es = DSW(DS_objects_set + 2), set = DSW(DS_objects_set);
+        if (es && m > 3 && m < 64) {
+            u16 p = (u16)(rd16(es, (u16)(set + 2 * m)) + set);
+            int nf = rd8(es, p), nv = rd8(es, (u16)(p + 1));
+            u16 a = (u16)(p + (stat ? 4 : 8)), stride = (u16)(nv * 2);
+            fprintf(stderr, "model %d (%s): %d faces, %d vertices\n", m, stat ? "static" : "parked", nf, nv);
+            for (int k = 0; k < nv; k++)
+                fprintf(stderr, "  v%-3d h %5d x %5d z %5d\n", k, (s16)rd16(es, (u16)(a + 2 * k)),
+                        (s16)rd16(es, (u16)(a + stride + 2 * k)), (s16)rd16(es, (u16)(a + 2 * stride + 2 * k)));
+            u16 f = (u16)(a + 3 * stride);
+            for (int k = 0; k < nf; k++, f = (u16)(f + 8)) {
+                u16 w0 = rd16(es, f), w1 = rd16(es, (u16)(f + 2)), w2 = rd16(es, (u16)(f + 4)), w3 = rd16(es, (u16)(f + 6));
+                int n = (w0 >> 14) + 1;
+                fprintf(stderr, "  f%-3d type %2d n %d: %d %d %d %d (colours %02X %02X)\n", k, w3 >> 11, n, w0 & 0x7FF,
+                        w1 & 0x7FF, w2 & 0x7FF, w3 & 0x7FF, (w1 >> 11) & 0x1F, (w2 >> 11) & 0x1F);
+            }
+        }
+    }
+    if (SDL_getenv("TD3_OBJ_DUMP")) {                                   /* every object of the leg: model, flags, size */
+        u16 es = DSW(DS_objects_set + 2), set = DSW(DS_objects_set);
+        int first = DSW(DS_obj_first_static);
+        for (int o = 1; o < DSW(DS_obj_count) && o < 160 && es; o++) {
+            u16 f = DSW(DS_obj_flags + 2 * o);
+            int m = f & 0x3F;
+            u16 p = (u16)(rd16(es, (u16)(set + 2 * m)) + set);
+            int nf = rd8(es, p), nv = rd8(es, (u16)(p + 1));
+            bool stat = o >= first;
+            u16 a = (u16)(p + (stat ? 4 : 8)), stride = (u16)(nv * 2);
+            double x0 = 1e9, x1 = -1e9, z0 = 1e9, z1 = -1e9, h0 = 1e9, h1 = -1e9;
+            for (int k = 0; k < nv && k < 300; k++) {
+                double h = (s16)rd16(es, (u16)(a + 2 * k)), x = (s16)rd16(es, (u16)(a + stride + 2 * k)),
+                       z = (s16)rd16(es, (u16)(a + 2 * stride + 2 * k));
+                x0 = fmin(x0, x); x1 = fmax(x1, x); z0 = fmin(z0, z); z1 = fmax(z1, z); h0 = fmin(h0, h); h1 = fmax(h1, h);
+            }
+            fprintf(stderr, "obj %3d %s model %2d flags %04X at %6.0f %6.0f y %4u: %d faces %d verts, %.0f x %.0f h %.0f\n", o,
+                    stat ? "static" : "dyn   ", m, f, DSW(DS_obj_x + 2 * o) * 4.0, DSW(DS_obj_z + 2 * o) * 4.0,
+                    DSW(DS_obj_y8 + 2 * o) >> 3, nf, nv, x1 - x0, z1 - z0, h1 - h0);
+        }
+    }
+    /* the object models the leg's houses use: their format and counts (village.c copies them) */
+    {
+        bool seen[64] = { false };
+        int first = DSW(DS_obj_first_static);
+        u16 es = DSW(DS_objects_set + 2), set = DSW(DS_objects_set);
+        for (int i = 0; i < nbld && es; i++) {
+            int o = bld[i].obj;
+            if (o <= 0) continue;
+            int m = DSW(DS_obj_flags + 2 * o) & 0x3F;
+            if (seen[m]) continue;
+            seen[m] = true;
+            u16 p = (u16)(rd16(es, (u16)(set + 2 * m)) + set);
+            fprintf(stderr, "  model %2d: %s, %d faces, %d vertices, %.0f x %.0f h %.0f\n", m, o >= first ? "static" : "parked",
+                    rd8(es, p), rd8(es, (u16)(p + 1)), 2 * bld[i].hx, 2 * bld[i].hz, bld[i].top);
+        }
     }
 }
 
@@ -729,6 +1456,7 @@ typedef struct {
     int car;                    /* the rival's or the stolen car's object, 0 none */
     u16 car_flags;              /* its flags before */
     bool spawned, crashed;
+    double cd;                  /* the race's count down (seconds run; < 0: not side by side yet) */
 } Job;
 static Job job, offer[2];       /* the job running; the pub's and the police's offer (type 0: none made yet) */
 static u32 job_rng;
@@ -746,40 +1474,70 @@ static const char *house_village(int i)
 }
 static const char *job_where(const Job *j) { return house_village(j->target); }
 
-/* a house without a service in another village than `from`'s, dmin .. dmax (x4, straight) from (X, Z), at most 40 m
- * from a road and reachable by road from there, not `not`; -1 none */
-static int pick_house(int from, double X, double Z, double dmin, double dmax, int not)
+/* the way by road from house a's door to house b's (their main road cells), metres; -1 none */
+static double house_route(int a, int b)
 {
-    int cand[NBLD], nc = 0;
+    if (a < 0 || a >= nbld || b < 0 || b >= nbld) return -1;
+    return route_cells(bld[a].rcell, bld[b].rcell);
+}
+
+/* a house without a service in another village than `from`'s, dmin .. dmax (x4, straight) from `from`, its door
+ * reachable (house_reachable) and by road from `from`'s, not `not`; -1 none */
+static int pick_list(int from, double dmin, double dmax, int not, int *cand)
+{
+    int nc = 0;
+    if (from < 0 || from >= nbld) return 0;
+    double X = bld[from].X, Z = bld[from].Z;
     for (int pass = 0; pass < 2 && nc == 0; pass++)
         for (int i = 0; i < nbld; i++) {
             const Bld *b = &bld[i];
             double d = hypot(b->X - X, b->Z - Z);
-            if (i == from || i == not || b->road > 4000) continue;
-            if (pass == 0 && (b->sv || (from >= 0 && b->vil == bld[from].vil) || d < dmin || d > dmax)) continue;
-            if (pass == 1 && d < 6000) continue;
-            if (road_route(X, Z, b->dX, b->dZ) < 0) continue;
+            if (i == from || i == not || !house_reachable(i)) continue;
+            if (pass == 0 && (b->sv || b->vil == bld[from].vil || d < dmin || d > dmax)) continue;
+            /* a leg of few houses: any house 60 m on, the services too, but not a police station (a getaway's drop
+             * there could never be made: its car sees the drop; nor a gang's hideout, nor hot goods) */
+            if (pass == 1 && (d < 6000 || b->sv == SV_POLICE)) continue;
+            if (house_route(from, i) < 0) continue;
             cand[nc++] = i;
         }
+    return nc;
+}
+
+static int pick_house(int from, double dmin, double dmax, int not)
+{
+    int cand[NBLD], nc = pick_list(from, dmin, dmax, not, cand);
     return nc ? cand[(int)(job_rand() * nc) % nc] : -1;
 }
 
-/* a parcel's time and pay for the way from (X, Z) to house t (TOWNS.md "Jobs") */
-static void delivery_terms(Job *o, double X, double Z, int t, double time_k, double pay_k)
+/* a parcel's time and pay for the way from house `from` to house t (TOWNS.md "Jobs") */
+static void delivery_terms(Job *o, int from, int t, double time_k, double pay_k)
 {
     const Bld *b = &bld[t];
-    double m = road_route(X, Z, b->dX, b->dZ), walk = b->road / 100.0;
+    double X = bld[from].X, Z = bld[from].Z;
+    double m = house_route(from, t), walk = b->road / 100.0;
     double secs = 40 + m / 10.0 + walk / 3.0, pay = fmin(60 + m * 0.3, 500);
     if (o->type == JOB_EXPRESS) secs = 30 + m / 13.0 + walk / 4.0;
     o->t_left = env_num("TD3_JOB_TIME", secs * time_k);
     o->reward = ((int)(pay * pay_k) + 5) / 10 * 10;
-    if (SDL_getenv("TD3_FOES_DEBUG"))
+    if (SDL_getenv("TD3_FOES_DEBUG") && !SDL_getenv("TD3_JOB_CHECK"))
         fprintf(stderr, "job offer: %s to house %d: %.0f m by road (%.0f straight), %.0f m on foot, %.0f s\n",
                 job_name[o->type], t, m, hypot(b->X - X, b->Z - Z) / 100.0, walk, o->t_left);
 }
 
 /* an offer from the house `from` (kind 0: the pub, 1: the police station), at random (TD3_JOB_TYPE=n: that one) */
+static bool make_offer_once(int kind, int from);
+
+/* an offer: another kind of job when one cannot be made here (a getaway with no drop on a leg of two houses); none
+ * left over. A failed one kept its type, and the next visit showed it as a job with no goal */
 static bool make_offer(int kind, int from)
+{
+    for (int k = 0; k < 8; k++)
+        if (make_offer_once(kind, from)) return true;
+    memset(&offer[kind], 0, sizeof offer[kind]);
+    return false;
+}
+
+static bool make_offer_once(int kind, int from)
 {
     Job *o = &offer[kind];
     memset(o, 0, sizeof *o);
@@ -794,21 +1552,22 @@ static bool make_offer(int kind, int from)
                                  r < 0.65 ? JOB_RACE : r < 0.80 ? JOB_GETAWAY : JOB_TAXI;
     switch (o->type) {
     case JOB_BOUNTY: case JOB_RECOVER: {
-        int t = pick_house(from, f->X, f->Z, 20000, 70000, -1);
+        int t = pick_house(from, 20000, 70000, -1);
         if (t < 0) return false;
         const Bld *b = &bld[t];
         o->target = t;
         o->gx = b->dX + b->nx * 500; o->gz = b->dZ + b->nz * 500; o->gy = b->gy;   /* before its door */
+        if (walk_at(o->gx, o->gz, NULL) > 1e8) { o->gx = b->dX; o->gz = b->dZ; }   /* no way there: at the door */
         o->reward = o->type == JOB_BOUNTY ? 300 + 50 * (int)(job_rand() * 5) : 250 + 50 * (int)(job_rand() * 4);
         return true;
     }
     case JOB_RACE: {                                                 /* a village ahead, on the way to the finish */
-        double here = to_finish(f->X, f->Z);
+        double here = to_finish(f->rcell);
         int cand[NBLD], nc = 0;
         for (int i = 0; i < nbld && here > 0; i++) {
             const Bld *b = &bld[i];
-            if (b->vil == f->vil || b->road > 4000) continue;
-            double m = road_route(f->X, f->Z, b->dX, b->dZ), there = to_finish(b->dX, b->dZ);
+            if (b->vil == f->vil || !house_reachable(i)) continue;
+            double m = house_route(from, i), there = to_finish(b->rcell);
             if (m < 300 || m > 1300 || there < 0 || there > here - 200) continue;
             cand[nc++] = i;
         }
@@ -818,13 +1577,13 @@ static bool make_offer(int kind, int from)
         o->t_left = 0;
         if (SDL_getenv("TD3_FOES_DEBUG"))
             fprintf(stderr, "job offer: RACE to house %d (%s), %.0f m by road\n", o->target, house_village(o->target),
-                    road_route(f->X, f->Z, bld[o->target].dX, bld[o->target].dZ));
+                    house_route(from, o->target));
         return true;
     }
     case JOB_GETAWAY: {                                              /* the loot somewhere, the drop somewhere else */
-        int a = pick_house(from, f->X, f->Z, 12000, 60000, -1);
+        int a = pick_house(from, 12000, 60000, -1);
         if (a < 0) return false;
-        int b = pick_house(a, bld[a].X, bld[a].Z, 15000, 70000, from);
+        int b = pick_house(a, 15000, 70000, from);
         if (b < 0) return false;
         o->target2 = a;
         o->target = b;
@@ -833,12 +1592,166 @@ static bool make_offer(int kind, int from)
     }
     default: break;
     }
-    int t = pick_house(from, f->X, f->Z, 12000, 70000, -1);
+    int t = pick_house(from, 12000, 70000, -1);
     if (t < 0) return false;
     o->target = t;
-    if (o->type == JOB_TAXI) delivery_terms(o, f->X, f->Z, t, 1.15, 1.2);
-    else delivery_terms(o, f->X, f->Z, t, 1.0, o->type == JOB_EXPRESS ? 1.6 : o->type == JOB_HOT ? 2.2 : 1.0);
+    if (o->type == JOB_TAXI) delivery_terms(o, from, t, 1.15, 1.2);
+    else delivery_terms(o, from, t, 1.0, o->type == JOB_EXPRESS ? 1.6 : o->type == JOB_HOT ? 2.2 : 1.0);
     return true;
+}
+
+/* ------------------------------------------------------------------------------------------------------
+ * Developer aid TD3_JOB_CHECK=1 (TOWNS.md "Jobs"): every offer each pub and police station of the leg can make,
+ * checked at the leg's start. The way between two doors on the walk grid, the road preferred (a step off it counts
+ * 8 times): its length on the road and off it. A timed job needs the player to get to the car (15 s), drive the
+ * road part, walk the rest (5 m/s): the speed it asks on the road is printed, over 13 m/s TIGHT, over 17 m/s (the car
+ * does 19 at most, measured) TOO SHORT.
+ * ------------------------------------------------------------------------------------------------------ */
+static bool check_way(double X0, double Z0, double X1, double Z1, double *on, double *off)
+{
+    int sx = (int)floor(X0 / WG), sz = (int)floor(Z0 / WG), tx = (int)floor(X1 / WG), tz = (int)floor(Z1 / WG);
+    *on = *off = 0;
+    for (int a = -1; a <= 1 && !wg_walkable(sx, sz); a++)                 /* the door's point or one by it */
+        for (int b = -1; b <= 1; b++) if (wg_walkable(sx + a, sz + b)) { sx += a; sz += b; break; }
+    for (int a = -1; a <= 1 && !wg_walkable(tx, tz); a++)
+        for (int b = -1; b <= 1; b++) if (wg_walkable(tx + a, tz + b)) { tx += a; tz += b; break; }
+    if (!wg_walkable(sx, sz) || !wg_walkable(tx, tz)) return false;
+    float *cost = malloc(sizeof(float) * WGX * WGZ);
+    int *par = malloc(sizeof(int) * WGX * WGZ);
+    if (!cost || !par) { free(cost); free(par); return false; }
+    for (int i = 0; i < WGX * WGZ; i++) { cost[i] = 1e30f; par[i] = -1; }
+    int s = sz * WGX + sx, t = tz * WGX + tx;
+    cost[s] = 0;
+    wg_heap_n = 0;
+    wg_push(0, s);
+    static const int dxs[8] = { 1, -1, 0, 0, 1, 1, -1, -1 }, dzs[8] = { 0, 0, 1, -1, 1, -1, 1, -1 };
+    bool found = false;
+    while (wg_heap_n > 0) {
+        WgEntry top = wg_pop();
+        if (top.d > cost[top.i]) continue;
+        if (top.i == t) { found = true; break; }
+        int gx = top.i % WGX, gz = top.i / WGX;
+        for (int e = 0; e < 8; e++) {
+            int nx = gx + dxs[e], nz = gz + dzs[e];
+            if (!wg_walkable(nx, nz)) continue;
+            bool diag = e >= 4;
+            if (diag && (!wg_walkable(nx, gz) || !wg_walkable(gx, nz))) continue;
+            bool road = wg_t[nz][nx] >= 0x10 && wg_t[nz][nx] <= 0x14, from_road = wg_t[gz][gx] >= 0x10 && wg_t[gz][gx] <= 0x14;
+            /* road to road at any step: a bridge's deck lies 190 units over its ramps in the tiles (Cape Cod's second
+             * leg), and the car drives over it */
+            if (!(road && from_road) && fabs(wg_y[nz][nx] - wg_y[gz][gx]) > WG_DY * (diag ? 1.41 : 1.0)) continue;
+            float nd = top.d + (float)((diag ? 1.41421356 : 1.0) * (road ? 1 : 8));
+            int ni = nz * WGX + nx;
+            if (nd >= cost[ni]) continue;
+            cost[ni] = nd;
+            par[ni] = top.i;
+            wg_push(nd, ni);
+        }
+    }
+    if (found) {
+        bool trace = env_num("TD3_JOB_CHECK", 1) >= 2;
+        int k = 0;
+        for (int i = t; par[i] >= 0; i = par[i], k++) {
+            int p = par[i], gx = i % WGX, gz = i / WGX;
+            double len = ((p % WGX != gx) && (p / WGX != gz) ? 1.41421356 : 1.0) * WG / 100.0;
+            if (wg_t[gz][gx] >= 0x10 && wg_t[gz][gx] <= 0x14) *on += len; else *off += len;
+            if (trace && k % 25 == 0) fprintf(stderr, "check: path %.0f %.0f type %02X\n", (gx + 0.5) * WG, (gz + 0.5) * WG, wg_t[gz][gx]);
+        }
+    }
+    free(cost);
+    free(par);
+    return found;
+}
+
+static int check_flags;                 /* the leg's TIGHT / TOO SHORT / NO WAY count */
+
+/* the speed a timed job asks on the road (m/s); taxi: from getting in, no walk at the end */
+static double check_timed(int type, int from, int t, const char *tag)
+{
+    Job o;
+    memset(&o, 0, sizeof o);
+    o.type = type;
+    delivery_terms(&o, from, t, type == JOB_TAXI ? 1.15 : 1.0, 1.0);
+    double on, off;
+    if (!check_way(bld[from].dX, bld[from].dZ, bld[t].dX, bld[t].dZ, &on, &off)) {
+        fprintf(stderr, "check:     %-7s -> house %2d %-16s NO WAY ON THE GRID\n", tag, t, house_village(t));
+        check_flags++;
+        return 99;
+    }
+    double spare = o.t_left - (type == JOB_TAXI ? 0 : 15) - off / 5.0, need = spare > 1 ? on / spare : 99;
+    const char *flag = need > 17 ? "  TOO SHORT" : need > 13 ? "  TIGHT" : "";
+    if (*flag) check_flags++;
+    fprintf(stderr, "check:     %-7s -> house %2d %-16s %4.0f s: road %5.0f m (cells %5.0f), off it %3.0f m -> %4.1f m/s%s\n",
+            tag, t, house_village(t), o.t_left, on, house_route(from, t), off, need, flag);
+    return need;
+}
+
+static void job_check(void)
+{
+    if (!SDL_getenv("TD3_JOB_CHECK")) return;
+    check_flags = 0;
+    int garages = 0;
+    for (int i = 0; i < nbld; i++) garages += bld[i].sv == SV_GARAGE;
+    for (int from = 0; from < nbld; from++) {
+        const Bld *f = &bld[from];
+        if (f->sv != SV_PUB && f->sv != SV_POLICE) continue;
+        fprintf(stderr, "check: %s house %d (%s), door %s%.0f m on foot from the main road\n", sv_name[f->sv], from,
+                house_village(from), f->road < 1e8 ? "" : "NOT ", f->road < 1e8 ? f->road / 100 : 0.0);
+        if (!house_reachable(from)) { fprintf(stderr, "check:   THE SERVICE ITSELF CANNOT BE REACHED\n"); check_flags++; }
+        int cand[NBLD], nc;
+        if (f->sv == SV_PUB) {
+            nc = pick_list(from, 12000, 70000, -1, cand);
+            fprintf(stderr, "check:   PARCEL / EXPRESS / HOT / TAXI: %d goals%s\n", nc, nc ? "" : "  NONE");
+            if (!nc) check_flags++;
+            for (int k = 0; k < nc; k++) {
+                check_timed(JOB_PARCEL, from, cand[k], "PARCEL");
+                check_timed(JOB_EXPRESS, from, cand[k], "EXPRESS");
+                check_timed(JOB_TAXI, from, cand[k], "TAXI");
+            }
+            /* the race: as make_offer */
+            double here = to_finish(f->rcell);
+            int nr = 0;
+            for (int i = 0; i < nbld && here > 0; i++) {
+                const Bld *b = &bld[i];
+                if (b->vil == f->vil || !house_reachable(i)) continue;
+                double m = house_route(from, i), there = to_finish(b->rcell);
+                if (m < 300 || m > 1300 || there < 0 || there > here - 200) continue;
+                nr++;
+                fprintf(stderr, "check:     RACE    -> house %2d %-16s %4.0f m by road\n", i, house_village(i), m);
+            }
+            fprintf(stderr, "check:   RACE: %d goals ahead%s (finish %s)\n", nr, nr ? "" : " (a parcel instead)",
+                    here > 0 ? "by road" : "NOT BY ROAD");
+            /* the getaway: every loot, its drops; a garage to lose the police by */
+            int nl = pick_list(from, 12000, 60000, -1, cand), pairs = 0, no_drop = 0;
+            for (int k = 0; k < nl; k++) {
+                int drops[NBLD], nd = pick_list(cand[k], 15000, 70000, from, drops);
+                pairs += nd;
+                if (!nd) no_drop++;
+                double on, off;
+                bool ok = check_way(f->dX, f->dZ, bld[cand[k]].dX, bld[cand[k]].dZ, &on, &off);
+                fprintf(stderr, "check:     LOOT    -> house %2d %-16s road %5.0f m, off it %3.0f m%s; %d drops\n", cand[k],
+                        house_village(cand[k]), on, off, ok ? "" : "  NO WAY ON THE GRID", nd);
+                if (!ok) check_flags++;
+            }
+            fprintf(stderr, "check:   GETAWAY: %d loots, %d loot-drop pairs%s; %d garage(s) on the leg\n", nl, pairs,
+                    no_drop ? "  (a loot with no drop)" : "", garages);
+        } else {
+            nc = pick_list(from, 20000, 70000, -1, cand);
+            fprintf(stderr, "check:   BOUNTY / STOLEN CAR: %d goals%s\n", nc, nc ? "" : "  NONE");
+            if (!nc) check_flags++;
+            for (int k = 0; k < nc; k++) {
+                const Bld *b = &bld[cand[k]];
+                double gx = b->dX + b->nx * 500, gz = b->dZ + b->nz * 500, on, off;
+                bool gang = walk_at(gx, gz, NULL) < 1e8;
+                bool ok = check_way(f->dX, f->dZ, b->dX, b->dZ, &on, &off);
+                fprintf(stderr, "check:     BOUNTY  -> house %2d %-16s road %5.0f m, off it %3.0f m; the gang %s%s\n", cand[k],
+                        house_village(cand[k]), on, off, gang ? "before the door" : "AT the door (no way 5 m out)",
+                        ok ? "" : "  NO WAY ON THE GRID");
+                if (!ok) check_flags++;
+            }
+        }
+    }
+    fprintf(stderr, "check: scene %d leg %d: %d flag(s)\n", DSW(DS_scene_index), DSB(DS_leg_index), check_flags);
 }
 
 /* a car of the job let go (the rival, the stolen car): its flags back, moving on */
@@ -883,38 +1796,92 @@ static void accept_job(int kind)
         fprintf(stderr, "job: %s to %s (house %d), $%d, %.0f s\n", job_name[job.type], job_where(&job), job.target, job.reward, job.t_left);
 }
 
-/* an object's place (true x4 / wrapped alike: within 8 cells wraps() compares them) */
+/* an object's place, true x4 (compare it with TX / TZ, never with the wrapped px / pz: they part 655 m east-west) */
 static void obj_place(int o, double *x, double *z)
 {
     *x = DSW(DS_obj_x + 2 * o) * 4.0;
     *z = DSW(DS_obj_z + 2 * o) * 4.0;
 }
 
-/* where the arrow points now (false: none) and its label */
-static bool job_goal(double *x, double *z, const char **label)
+/* where the arrow points now (false: none), its label and the goal's road cell (-1: the one nearest it) */
+static bool job_goal(double *x, double *z, const char **label, int *cell)
 {
     const Bld *b = job.target >= 0 && job.target < nbld ? &bld[job.target] : NULL;
     if (!b) return false;
     *x = b->dX; *z = b->dZ;
+    *cell = b->rcell;
     *label = "DROP";
     switch (job.type) {
     case JOB_BOUNTY:
-        if (job.stage == 2) { *x = bld[job.from].dX; *z = bld[job.from].dZ; *label = "POLICE"; return true; }
+        if (job.stage == 2) { *x = bld[job.from].dX; *z = bld[job.from].dZ; *cell = bld[job.from].rcell; *label = "POLICE"; return true; }
         *x = job.gx; *z = job.gz; *label = "GANG";
         return true;
     case JOB_RACE:
+        if (job.stage == 1 && job.car > 0) { obj_place(job.car, x, z); *cell = -1; *label = "RIVAL"; return true; }
         *label = "FINISH";
         return job.stage == 2;
     case JOB_TAXI:
         return job.stage == 1;
     case JOB_GETAWAY:
-        if (job.stage == 0) { *x = bld[job.target2].dX; *z = bld[job.target2].dZ; *label = "LOOT"; }
+        if (job.stage == 0) { *x = bld[job.target2].dX; *z = bld[job.target2].dZ; *cell = bld[job.target2].rcell; *label = "LOOT"; }
         return true;
     case JOB_RECOVER:
-        if (job.stage >= 1 && job.car > 0) { obj_place(job.car, x, z); *label = job.stage == 1 ? "STOLEN" : "CAR"; return true; }
+        if (job.stage >= 1 && job.car > 0) { obj_place(job.car, x, z); *cell = -1; *label = job.stage == 1 ? "STOLEN" : "CAR"; return true; }
         *label = "THEFT";
         return true;
     default: return true;
+    }
+}
+
+/* where road crosses the edge e of road cell c (its middle), true x4 */
+static void edge_point(int c, int e, double *x, double *z)
+{
+    int col = c & 31, zc = 15 - (c >> 5);
+    double along = (redge[c][e][0] + redge[c][e][1]) / 2;
+    if (e == 0)      { *x = (col + 1) * 4096.0; *z = zc * 4096.0 + along; }
+    else if (e == 1) { *x = col * 4096.0;       *z = zc * 4096.0 + along; }
+    else if (e == 2) { *x = col * 4096.0 + along; *z = (zc + 1) * 4096.0; }
+    else             { *x = col * 4096.0 + along; *z = zc * 4096.0; }
+}
+
+/* The job's arrow along the road (TOWNS.md "Jobs"; true x4, as the goals; the camera's wrapped place would turn a goal
+ * over 327 m east or west round): from the player's road cell the way by road to the goal's cell (a breadth-first
+ * search back from the goal), the arrow at its crossing 50 m on or more; within two cells of the goal by road, 120 m
+ * straight, or off the road network: straight at the goal. *road_m: the way's length (metres; -1 straight). */
+static void arrow_aim(double gx, double gz, int gcell, double *ax, double *az, double *road_m)
+{
+    *ax = gx; *az = gz; *road_m = -1;
+    if (gcell < 0) gcell = road_cell_near(gx, gz);
+    int col = (int)floor(TX / 4096.0), zc = (int)floor(TZ / 4096.0), pc = -1;
+    if (col >= 0 && col <= 31 && zc >= 0 && zc <= 15 && rnode[col + (15 - zc) * 32]) pc = col + (15 - zc) * 32;
+    if (pc < 0) pc = road_cell_near(TX, TZ);
+    if (gcell < 0 || pc < 0 || hypot(gx - TX, gz - TZ) < 12000) return;
+    static int dist[512], queue[512];
+    for (int i = 0; i < 512; i++) dist[i] = -1;
+    int qh = 0, qt = 0;
+    dist[gcell] = 0; queue[qt++] = gcell;
+    while (qh < qt && dist[pc] < 0) {
+        int c = queue[qh++];
+        for (int e = 0; e < 4; e++) {
+            int d = road_joined(c, e);
+            if (d < 0 || dist[d] >= 0) continue;
+            dist[d] = dist[c] + 1;
+            queue[qt++] = d;
+        }
+    }
+    if (dist[pc] < 0) return;                                        /* off the network: straight */
+    *road_m = dist[pc] * 40.96 + 20;
+    if (dist[pc] <= 2) return;
+    for (int c = pc, step = 0; step < 8 && dist[c] > 0; step++) {
+        int next = -1, ne = -1;
+        for (int e = 0; e < 4 && next < 0; e++) {
+            int d = road_joined(c, e);
+            if (d >= 0 && dist[d] == dist[c] - 1) { next = d; ne = e; }
+        }
+        if (next < 0) break;
+        edge_point(c, ne, ax, az);
+        if (hypot(*ax - TX, *az - TZ) > 5000 || dist[next] == 0) break;
+        c = next;
     }
 }
 
@@ -1014,38 +1981,57 @@ static void job_frame(const EnhSnap *c, bool foot, double feet, double dt)
 
     case JOB_RACE: {
         if (job.stage == 0) { if (!foot) { job.stage = 1; job.t = 0; } return; }
-        if (job.stage == 1) {                                        /* a rival near: the opponent, else a car going there */
+        if (job.stage == 1) {
+            /* the rival: a car within 60 m (the opponent first, else one of the traffic going towards the goal) waits
+             * on the road, the arrow on it; side by side with it (15 m) and slow, the count down, then GO. Before, the
+             * nearest car within 150 m was taken wherever it was, and the player never saw whom he raced */
             if (foot) return;
+            if (job.car > 0) {
+                double ox, oz;
+                obj_place(job.car, &ox, &oz);
+                double e = hypot(ox - TX, oz - TZ);
+                if (e > 25000) { job_release_car(); job.cd = -1; return; }    /* driven off: another one */
+                if (job.cd < 0) {
+                    if ((e < 1500 && DSW(DS_car_speed) < 20) || env_num("TD3_JOB_GOTO", 0) > 0) {   /* the test: at once */
+                        job.cd = 0;
+                        centre_msg("ON YOUR MARKS", 0xF0E070, 1.0);
+                    }
+                    return;
+                }
+                if (e > 2500) { job.cd = -1; return; }                  /* pulled away early */
+                job.cd += dt;
+            }
             if (!job.car) {
                 int best = 0;
-                double bd = 15000.0 * 15000.0;
+                double bd = 6000.0 * 6000.0;
                 int n = DSW(DS_obj_a475);
                 for (int o = 1; o < n && o < 160; o++) {
                     if (!job_car_ok(o, true)) continue;
                     double ox, oz;
                     obj_place(o, &ox, &oz);
-                    double ex = wraps(ox - px), ez = wraps(oz - pz), e = ex * ex + ez * ez;
+                    double ex = ox - TX, ez = oz - TZ, e = ex * ex + ez * ez;            /* true x4 */
                     bool opp = DSB(DS_race_computer_cars) != 0 && o <= 2;
                     if (!opp) {                                      /* traffic: heading towards the goal */
                         double h = (u16)(DSW(DS_obj_heading + 2 * o) + 0x4000) * A2RAD;
-                        double tx = wraps(b->dX - ox), tz = wraps(b->dZ - oz), tl = sqrt(tx * tx + tz * tz);
+                        double tx = b->dX - ox, tz = b->dZ - oz, tl = sqrt(tx * tx + tz * tz);
                         if (tl < 1 || (sin(h) * tx + cos(h) * tz) / tl < 0.3) continue;
                     }
                     if (opp) e *= 0.25;                              /* the opponent first */
                     if (e < bd) { bd = e; best = o; }
                 }
                 if (!best) {
-                    if (job.t > 45) job_end("NOBODY SHOWED UP - RACE OFF", false);
+                    if (job.t > 90) job_end("NOBODY SHOWED UP - RACE OFF", false);
                     return;
                 }
                 job.car = best;
                 job.car_flags = DSW(DS_obj_flags + 2 * best);
                 weapon_hold(best, true);
-                job.t = 0;
+                job.cd = -1;
+                centre_msg("YOUR RIVAL IS WAITING", 0xF0E070, 2.0);
                 if (SDL_getenv("TD3_FOES_DEBUG")) fprintf(stderr, "job: rival %d\n", best);
                 return;
             }
-            if (job.t > 3.0) {                                       /* go */
+            if (job.cd > 3.0) {                                      /* go */
                 job.stage = 2;
                 weapon_hold(job.car, false);
                 bool opp = DSB(DS_race_computer_cars) != 0 && job.car <= 2;
@@ -1061,7 +2047,7 @@ static void job_frame(const EnhSnap *c, bool foot, double feet, double dt)
             if (weapon_wrecked(job.car)) { job_paid("YOUR RIVAL IS OUT!"); return; }
             double ox, oz;
             obj_place(job.car, &ox, &oz);
-            double ex = wraps(b->dX - ox), ez = wraps(b->dZ - oz);
+            double ex = b->dX - ox, ez = b->dZ - oz;
             if (sqrt(ex * ex + ez * ez) < b->road + 2500) { job_end("YOUR RIVAL WON - RACE LOST", false); return; }
         }
         if (job.t > 300) job_end("RACE OFF", false);
@@ -1078,7 +2064,7 @@ static void job_frame(const EnhSnap *c, bool foot, double feet, double dt)
                 if (!job_car_ok(o, false)) continue;
                 double ox, oz;
                 obj_place(o, &ox, &oz);
-                double ex = wraps(ox - px), ez = wraps(oz - pz), e = ex * ex + ez * ez;
+                double ex = ox - TX, ez = oz - TZ, e = ex * ex + ez * ez;            /* true x4 */
                 if (e < bd) { bd = e; best = o; }
             }
             if (!best) {
@@ -1093,7 +2079,7 @@ static void job_frame(const EnhSnap *c, bool foot, double feet, double dt)
                         nn++;
                         double ox, oz;
                         obj_place(o, &ox, &oz);
-                        nd = fmin(nd, hypot(wraps(ox - px), wraps(oz - pz)));
+                        nd = fmin(nd, hypot(ox - TX, oz - TZ));
                     }
                     fprintf(stderr, "job: no car to steal yet (%d moving, %d free, nearest %.0f)\n", all, nn, nd);
                 }
@@ -1113,7 +2099,7 @@ static void job_frame(const EnhSnap *c, bool foot, double feet, double dt)
         if (weapon_wrecked(job.car)) { job_end("YOU WRECKED IT - JOB FAILED", false); return; }
         double ox, oz;
         obj_place(job.car, &ox, &oz);
-        double ex = wraps(ox - px), ez = wraps(oz - pz), e = sqrt(ex * ex + ez * ez);
+        double ex = ox - TX, ez = oz - TZ, e = sqrt(ex * ex + ez * ez);   /* true x4 */
         if (job.stage == 1) {
             if (e > 50000) { job_end("IT GOT AWAY - JOB FAILED", false); return; }
             if (weapon_hits(job.car) >= 2.0) {                       /* two pistol rounds stop it (five wreck it) */
@@ -1345,6 +2331,7 @@ void enh_town_frame(const EnhSnap *c, const EnhView *v, double dt)
         memset(offer, 0, sizeof offer);
         if (job.type) job_end("JOB LOST", false);
         if (SDL_getenv("TD3_TOWN_DUMP")) enh_town_dump();
+        job_check();
         {   /* developer aid TD3_JOB=1..4 (parcel, express, hot goods, bounty): a job at once, from the nearest pub
              * (police station) */
             int want = (int)env_num("TD3_JOB", 0);
@@ -1446,8 +2433,110 @@ void enh_town_frame(const EnhSnap *c, const EnhView *v, double dt)
             fprintf(stderr, "town: walker put before the %s of house %d (%s)\n", sv_name[b->sv], bi, vil[b->vil].name);
         }
     }
+    /* developer aid TD3_OBJ_TOUR=dir,model: once out of the car, the walker visits every object of that model, 5 m
+     * east of it looking at it, and a picture of each is saved (dir/obj_mMM_NNN.bmp, NNN the object's slot) */
+    const char *otour = SDL_getenv("TD3_OBJ_TOUR");
+    if (otour && foot && strchr(otour, ',')) {
+        static int oi = 0, phase = 0;
+        static double ot, ocx = -1, ocz;
+        int want = SDL_atoi(strchr(otour, ',') + 1);
+        if (ocx < 0) { ocx = TX; ocz = TZ; }
+        ot += dt;
+        while (oi < DSW(DS_obj_count) && oi < 160 && (oi < 1 || (DSW(DS_obj_flags + 2 * oi) & 0x3F) != want)) oi++;
+        if (oi < DSW(DS_obj_count) && oi < 160) {
+            double gx = DSW(DS_obj_x + 2 * oi) * 4.0 + 500, gz = DSW(DS_obj_z + 2 * oi) * 4.0;
+            if (phase == 0) {                                            /* walking there, 20 m a frame */
+                double dx = gx - ocx, dz = gz - ocz, d = hypot(dx, dz);
+                if (d <= 2000) { ocx = gx; ocz = gz; phase = 1; ot = 0; }
+                else { ocx += dx / d * 2000; ocz += dz / d * 2000; }
+                int wx = (int)floor(ocx / WG), wz = (int)floor(ocz / WG);
+                double gy = DSW(DS_obj_y8 + 2 * oi) >> 3;
+                if (wx >= 0 && wx < WGX && wz >= 0 && wz < WGZ && wg_y[wz][wx] > -1e8f) gy = wg_y[wz][wx];
+                foot_teleport(ocx, ocz, gy + 4);
+                foot_set_view(atan2(-1.0, 0.0) / A2RAD, -20);
+            } else if (ot > 1.2) {
+                char path[600];
+                SDL_snprintf(path, sizeof path, "%.*s/obj_m%02d_%03d.bmp", (int)(strchr(otour, ',') - otour), otour, want, oi);
+                host_snapshot_to(path);
+                fprintf(stderr, "objtour: %s\n", path);
+                oi++;
+                phase = 0;
+            }
+        }
+    }
+    /* developer aid TD3_TOWN_TOUR=dir: once out of the car, the walker visits every house of the leg in turn and a
+     * picture of each is saved from two places: the road nearest its door, at least 7 m from the house (or
+     * TD3_TOWN_TOUR_R out from the door with no road within 30 m), looking at it (dir/tour_sS_lL_hNNa.bmp) and
+     * 30 m out, 40 degrees to the side (...b.bmp); the feet on the walk grid's ground there. It goes there 20 m a
+     * frame, as a driver would (TOWNS.md "Developer aids") */
+    const char *tour = SDL_getenv("TD3_TOWN_TOUR");
+    if (tour && foot) {
+        if (menu.open) close_menu();                                     /* walked through a ring on the way */
+        static int ti = -1;
+        static double tt, cx, cz, gxt, gzt, yaw;
+        static bool shot, there;
+        tt += dt;
+        if (ti < 0 || (there && tt > 1.6)) {
+            if (ti < 0) { ti = 2 * (int)env_num("TD3_TOWN_TOUR_FROM", 0) - 1; cx = TX; cz = TZ; }
+            ti++;
+            if (SDL_getenv("TD3_TOWN_TOUR_NEW"))                         /* only the added houses */
+                while (ti < 2 * nbld && bld[ti / 2].obj >= 0) ti++;
+            tt = 0;
+            shot = there = false;
+            if (ti < 2 * nbld) {
+                const Bld *b = &bld[ti / 2];
+                double r = ti & 1 ? 3000 : env_num("TD3_TOWN_TOUR_R", 1800), a = ti & 1 ? 0.7 : 0.0;
+                double ox = b->nx * cos(a) - b->nz * sin(a), oz = b->nx * sin(a) + b->nz * cos(a);
+                gxt = b->dX + ox * r;
+                gzt = b->dZ + oz * r;
+                if (!(ti & 1)) {                                         /* a: from the road nearest the door */
+                    double best = 3000 * 3000.0;
+                    int g0x = (int)floor(b->dX / WG), g0z = (int)floor(b->dZ / WG);
+                    for (int dz = -24; dz <= 24; dz++)
+                        for (int dx = -24; dx <= 24; dx++) {
+                            int x = g0x + dx, z = g0z + dz;
+                            if (x < 0 || x >= WGX || z < 0 || z >= WGZ || wg_t[z][x] < 0x10 || wg_t[z][x] > 0x14) continue;
+                            double qx = x * (double)WG - b->dX, qz = z * (double)WG - b->dZ;
+                            if (qx * qx + qz * qz < best) { best = qx * qx + qz * qz; gxt = x * (double)WG; gzt = z * (double)WG; }
+                        }
+                    double d = hypot(gxt - b->X, gzt - b->Z), want = fmax(b->hx, b->hz) + 700;
+                    if (d < want && d > 1) { gxt = b->X + (gxt - b->X) / d * want; gzt = b->Z + (gzt - b->Z) / d * want; }
+                }
+                yaw = atan2(b->X - gxt, b->Z - gzt) / A2RAD;
+            } else if (ti == 2 * nbld) fprintf(stderr, "tour: done\n");
+        }
+        if (ti >= 0 && ti < 2 * nbld && !there) {
+            double dx = gxt - cx, dz = gzt - cz, d = hypot(dx, dz);
+            if (d <= 2000) { cx = gxt; cz = gzt; there = true; tt = 0; }
+            else { cx += dx / d * 2000; cz += dz / d * 2000; }
+            double gy = bld[ti / 2].y;
+            int gx = (int)floor(cx / WG), gz = (int)floor(cz / WG);
+            if (gx >= 0 && gx < WGX && gz >= 0 && gz < WGZ && wg_y[gz][gx] > -1e8f) gy = wg_y[gz][gx];
+            foot_teleport(cx, cz, gy + 4);
+            foot_set_view(yaw, 0);
+        }
+        if (ti >= 0 && ti < 2 * nbld && there && !shot && tt > 1.2) {
+            char path[600];
+            SDL_snprintf(path, sizeof path, "%s/tour_s%d_l%d_h%02d%c.bmp", tour, DSW(DS_scene_index), DSB(DS_leg_index),
+                         ti / 2, ti & 1 ? 'b' : 'a');
+            host_snapshot_to(path);
+            fprintf(stderr, "tour: %s: walker at %.0f %.0f (true), feet %.0f; house %.0f %.0f; camera %.0f %.0f, sprite %u %u, "
+                    "obj %d at %u %u flags %04X\n", path, TX, TZ, py - 70, bld[ti / 2].X, bld[ti / 2].Z, px, pz,
+                    DSW(DS_sprite_x) * 4, DSW(DS_sprite_z) * 4, bld[ti / 2].obj,
+                    bld[ti / 2].obj > 0 ? DSW(DS_obj_x + 2 * bld[ti / 2].obj) * 4 : 0,
+                    bld[ti / 2].obj > 0 ? DSW(DS_obj_z + 2 * bld[ti / 2].obj) * 4 : 0,
+                    bld[ti / 2].obj > 0 ? DSW(DS_obj_flags + 2 * bld[ti / 2].obj) : 0);
+            shot = true;
+        }
+    }
 
-    /* the services: the door walked into, the garage's bay driven into */
+    /* the services: the door walked into, the garage's bay driven into. A job's door (its ring, the bounty's police
+     * station) opens no shop while the job wants it: a leg with only services left for goals (Pacific's fifth: a
+     * getaway's loot at the gun shop, its drop at the garage) opened the shop's menu over the job, and the menu holds
+     * the walker; walked out and in again, the shop opens */
+    int job_door = -1;
+    if (job.type && !job_ring(&job_door)) job_door = -1;
+    if (job.type == JOB_BOUNTY && job.stage == 2) job_door = job.from;
     for (int i = 0; i < nbld; i++) {
         Bld *b = &bld[i];
         if (!b->sv) continue;
@@ -1459,6 +2548,7 @@ void enh_town_frame(const EnhSnap *c, const EnhView *v, double dt)
         }
         if (foot) {
             if (d > DOOR_R * 2.4) b->armed = true;
+            else if (i == job_door) b->armed = false;
             if (d < DOOR_R && b->armed && !menu.open && fabs(feet - b->gy) < 90) { b->armed = false; open_menu(i); }
         } else if (b->sv == SV_GARAGE) {
             double gx = wraps(b->gX - px), gz = wraps(b->gZ - pz), dg = sqrt(gx * gx + gz * gz);
@@ -1479,7 +2569,8 @@ void enh_town_frame(const EnhSnap *c, const EnhView *v, double dt)
             const Bld *b = &bld[job.target];
             double gx, gz;
             const char *lab;
-            if (!job_goal(&gx, &gz, &lab)) { gx = b->dX; gz = b->dZ; }
+            int gcell;
+            if (!job_goal(&gx, &gz, &lab, &gcell)) { gx = b->dX; gz = b->dZ; }
             if (job.type == JOB_GETAWAY && job.stage == 0) b = &bld[job.target2];
             if (job.type == JOB_BOUNTY && job.stage == 2) b = &bld[job.from];
             double off = job.type == JOB_BOUNTY && job.stage == 0 ? 4000 : job.type == JOB_RECOVER && job.stage == 0 ? 6000 : 300;
@@ -1743,12 +2834,14 @@ void enh_town_hud(u32 *xrgb, const EnhSnap *s, const EnhView *v, int em)
             break;
         case JOB_RACE:
             if (job.stage == 0) snprintf(t, sizeof t, "RACE > %s: GET IN", job_where(&job));
-            else if (job.stage == 1) snprintf(t, sizeof t, job.car ? "RACE > %s: READY" : "RACE > %s: NO RIVAL YET", job_where(&job));
+            else if (job.stage == 1 && !job.car) snprintf(t, sizeof t, "RACE > %s: NO RIVAL YET", job_where(&job));
+            else if (job.stage == 1 && job.cd < 0) snprintf(t, sizeof t, "RACE: PULL UP BESIDE YOUR RIVAL");
+            else if (job.stage == 1) snprintf(t, sizeof t, "RACE > %s: READY", job_where(&job));
             else {
                 double ox, oz;
                 obj_place(job.car, &ox, &oz);
                 const Bld *b = &bld[job.target];
-                double me = hypot(wraps(b->dX - v->cam_x4), wraps(b->dZ - v->cam_z4)), him = hypot(wraps(b->dX - ox), wraps(b->dZ - oz));
+                double me = hypot(b->dX - TX, b->dZ - TZ), him = hypot(b->dX - ox, b->dZ - oz);   /* true x4 all */
                 snprintf(t, sizeof t, "RACE > %s", job_where(&job));
                 snprintf(sub, sizeof sub, "RIVAL %dM %s", (int)(fabs(me - him) / 100), him < me ? "AHEAD" : "BEHIND");
             }
@@ -1771,15 +2864,26 @@ void enh_town_hud(u32 *xrgb, const EnhSnap *s, const EnhView *v, int em)
         if (sub[0]) enh_text(xrgb, FW, FH, S, sub, em + 160 - enh_text_width(sub, 1) / 2, 44, 1, 0xF0E070, true);
         bool late = job.t_left > 0 && job.t_left < 15 && fmod(job.t_left, 0.6) < 0.3;
         enh_text(xrgb, FW, FH, S, t, em + 160 - enh_text_width(t, 1) / 2, 8, 1, late ? 0xFF6050 : 0xF0E070, true);
-        if (job.type == JOB_RACE && job.stage == 1 && job.car) {     /* the count down */
+        if (job.type == JOB_RACE && job.stage == 1 && job.car && job.cd >= 0 && job.cd < 3) {   /* the count down */
             char cd[4];
-            snprintf(cd, sizeof cd, "%d", 3 - (int)job.t);
+            snprintf(cd, sizeof cd, "%d", 3 - (int)job.cd);
             enh_text(xrgb, FW, FH, S, cd, em + 160 - enh_text_width(cd, 3) / 2, 60, 3, 0xF0E070, true);
         }
         double gx, gz;
         const char *lab;
-        if (job_goal(&gx, &gz, &lab)) {
-            double dx = wraps(gx - v->cam_x4), dz = wraps(gz - v->cam_z4), d = sqrt(dx * dx + dz * dz);
+        int gcell;
+        if (job_goal(&gx, &gz, &lab, &gcell)) {
+            double d = hypot(gx - TX, gz - TZ), ax, az, road_m;           /* true x4: see arrow_aim */
+            arrow_aim(gx, gz, gcell, &ax, &az, &road_m);
+            if (road_m > 0) d = road_m * 100;
+            double dx = ax - TX, dz = az - TZ;
+            static u64 arrow_log;
+            if (SDL_getenv("TD3_FOES_DEBUG") && SDL_GetTicks() > arrow_log) {
+                arrow_log = SDL_GetTicks() + 1000;
+                fprintf(stderr, "arrow: %s at %.0f %.0f (%.0f m straight), player %.0f %.0f, aim %.0f %.0f (%.0f m on), "
+                        "%s %.0f m\n", lab, gx, gz, hypot(gx - TX, gz - TZ) / 100, TX, TZ, ax, az, hypot(dx, dz) / 100,
+                        road_m > 0 ? "by road" : "straight", d / 100);
+            }
             if (d > 600) {
                 double a = atan2(dx, dz) - v->heading * A2RAD, sa = sin(a), ca = cos(a);
                 double qx = (em + 160) * S, qy = 100.0 * S, rr = 84.0 * S;

@@ -35,7 +35,12 @@ police then know where the player is. Shooting the ambushes' gunmen is no crime.
 ## The search
 
 * The police see the player: an officer, or a police car with a line of sight from its roof within 7000 (four
-  checks a second). Seen, the last known place is where the player is.
+  checks a second). Seen, the last known place is where the player is. Every check of a car against the player or
+  the last known place first asks `car_true_near`: the car within 320 m east-west in true map units. The wrapped
+  places (the snapshot's, a car's `(u16)(x << 2)`) part every 655 m on a map 1310 m wide, and a police car 632 m
+  east of the player looked 22 m off: it "saw" the player for ever and a getaway could not end (Pacific - Yosemite's
+  second leg, drop at RED MESA, 2026-11-07). The same guard on the witnesses, the cars that join the chase, the ones
+  made police and the ambush's car across the road.
 * The stars flash while nobody sees the player. Once the police have been near the last known place (a car within
   4000, any officer, or 45 s after the crime), the time out of sight counts: 12 s at one star, 20 at two, 30 at
   three, and they lose the player ("LOST THEM"): the chases end (`police_pursuit_clear`), the stopped cars drive on,

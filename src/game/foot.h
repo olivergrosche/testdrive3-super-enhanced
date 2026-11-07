@@ -10,6 +10,8 @@ bool foot_active(void);
 
 /* frame_update, before the simulation: a pending exit / entry (pad Y, key E) */
 void foot_frame_begin(void);
+/* controls_poll: while an exit at speed waits, the car brakes itself (the hard brake for the pedals) */
+u8 foot_bail_controls(u8 cl);
 /* frame_update, instead of car_physics while on foot */
 void foot_physics(void);
 /* frame_draw, after the ground under the camera is known and before crash_start: the car's crash and wall
