@@ -37,9 +37,12 @@ The downloads are on the [Releases page](https://github.com/olivergrosche/testdr
   (`packaging/appimage/README-LINUX.md`).
 * **Steam Deck:** the AppImage, added to Steam as a non-Steam game with the launch option `--play` (no Proton
   needed), or the Windows zip's `testdrive3-enhanced.exe` under Proton.
-* **Is your copy the right one?** `testdrive3-enhanced.exe --check` (the AppImage: `--check`) loads `TDIII.EXE` and
-  says whether it fits. The version 3.0 file this mod was made with is 125,251 bytes; an older 1990 `TD3.EXE`
-  (123,745 bytes) stops with "unexpected load image size". Upper or lower case file names do not matter.
+* **Which copy works:** version 3.0. Its `TDIII.EXE` is **125,251 bytes**, dated 26 April 1994, with the SHA-1
+  `a09b0d620b91247976a7d172fd433e8c6af25926` (SHA-256
+  `8c5e8fd00f39fa094aa7227d8a212fa16af3fbe47a6ca31c85cf32a740b03b96`). Many copies around are other versions; they
+  stop with "unexpected load image size". Check yours: `testdrive3-enhanced.exe --check` (the AppImage: `--check`)
+  loads `TDIII.EXE` and says whether it fits; or compare the hash (Windows: `certutil -hashfile TDIII.EXE SHA1`,
+  Linux: `sha1sum TDIII.EXE`). Upper or lower case file names do not matter.
 
 **First minutes:** drive as in the original (pad: RT gas, LT brake, left stick; keyboard: arrows). Tap Y on the pad
 (F8) for the chase view. Hold Y (E) to get out, also while driving: the car brakes itself. On foot RT (left mouse)
