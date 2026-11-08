@@ -1,0 +1,138 @@
+#!/bin/sh
+# Test Drive III Super Enhanced: what the AppImage runs.
+#
+# The image is read-only, but the game writes its high scores and last choices next to its data. So the data lives in
+# a folder of the user's: the first start fills it from the image, later starts only add what is missing, never
+# overwrite. Double-clicking opens the launcher, as on Windows; --play or any game option starts the game directly.
+#
+# The public image holds no game files: the user copies their own Test Drive III (version 3.0) into the data folder's
+# Game (or picks another folder in the launcher). Without them the start explains where they go and opens that folder.
+
+HERE=$(dirname "$(readlink -f "$0")")
+BIN=$HERE/usr/bin
+SHARE=$HERE/usr/share/testdrive3-super-enhanced
+GAME=$BIN/testdrive3-enhanced
+LAUNCHER="$BIN/Test Drive III Enhanced"
+DATA=${XDG_DATA_HOME:-$HOME/.local/share}/testdrive3-super-enhanced
+CONF=${XDG_CONFIG_HOME:-$HOME/.config}/test-drive-iii-enhanced
+
+usage() {
+    cat <<EOF
+Test Drive III Super Enhanced
+
+  (no arguments)      open the launcher (car, course, graphics, keys), Play starts the game
+  --play              start the game directly with the options in testdrive3-enhanced.args
+  --game-help         the game's own options; any of them can be given here and start the game directly
+  --appimage-extract  unpack the image (for systems without FUSE: --appimage-extract-and-run)
+
+Your files:
+  $DATA/Game                         your Test Drive III files (version 3.0), high scores, last choices
+  $DATA/testdrive3-enhanced.args     options for --play
+  $DATA/docs                         README, controls, what the mod adds
+  $CONF/settings.ini                 the launcher's settings
+EOF
+}
+
+# The data folder: only what is missing, so high scores and choices survive a newer image.
+seed() {
+    mkdir -p "$DATA/Game" "$DATA/docs" "$CONF" || exit 1
+    # Only a private image brings game files along.
+    if [ -d "$SHARE/Game" ]; then
+        for f in "$SHARE/Game/"*; do
+            to=$DATA/Game/${f##*/}
+            [ -e "$to" ] && continue
+            cp "$f" "$to" && chmod u+w "$to"
+        done
+    fi
+    # The docs belong to the image: always the current ones.
+    cp -f "$HERE/usr/share/doc/testdrive3-super-enhanced/"* "$DATA/docs/" 2>/dev/null
+    chmod -R u+w "$DATA/docs" 2>/dev/null
+    [ -e "$DATA/testdrive3-enhanced.args" ] || cp "$SHARE/testdrive3-enhanced.args" "$DATA/testdrive3-enhanced.args"
+    chmod u+w "$DATA/testdrive3-enhanced.args" 2>/dev/null
+    # The launcher's default game folder would be inside the image, so its settings always name ours.
+    if [ ! -e "$CONF/settings.ini" ]; then
+        sed "s|@GAMEDIR@|$DATA/Game|" "$SHARE/settings.ini.in" > "$CONF/settings.ini"
+    elif grep -q '^GameFolder=$' "$CONF/settings.ini"; then
+        sed -i "s|^GameFolder=\$|GameFolder=$DATA/Game|" "$CONF/settings.ini"
+    fi
+}
+
+# The game folder: the launcher's choice if that folder exists, else ours.
+game_dir() {
+    g=$(sed -n 's/^GameFolder=//p' "$CONF/settings.ini" 2>/dev/null | head -n 1 | tr -d '\r')
+    if [ -n "$g" ] && [ -d "$g" ]; then echo "$g"; else echo "$DATA/Game"; fi
+}
+
+# The game looks its files up regardless of case, and takes TDIII.EXE or TD3.EXE.
+has_game() {
+    ls -1 "$1" 2>/dev/null | grep -qix -e 'tdiii.exe' -e 'td3.exe'
+}
+
+no_game() {
+    msg="Test Drive III Super Enhanced needs your own copy of Test Drive III (version 3.0).
+
+Copy all its files (TDIII.EXE, PLAYDISK.DAT, DATAA.DAT, the car and scene files ...) into
+
+    $DATA/Game
+
+and start again. The folder opens now."
+    echo "$msg" >&2
+    if [ -n "${DISPLAY:-}${WAYLAND_DISPLAY:-}" ]; then
+        if command -v zenity >/dev/null 2>&1; then
+            zenity --info --no-wrap --title="Test Drive III Super Enhanced" --text="$msg" 2>/dev/null
+        elif command -v kdialog >/dev/null 2>&1; then
+            kdialog --title "Test Drive III Super Enhanced" --msgbox "$msg" 2>/dev/null
+        fi
+        command -v xdg-open >/dev/null 2>&1 && xdg-open "$DATA/Game" >/dev/null 2>&1 &
+    fi
+    exit 1
+}
+
+run_game() {
+    set -f
+    # shellcheck disable=SC2046  # the options file is one line, split as on a command line
+    set -- $(cat "$DATA/testdrive3-enhanced.args" 2>/dev/null) "$@"
+    set +f
+    exec "$GAME" --game-dir "$GAMEDIR" "$@"
+}
+
+find_game() {
+    for link in /proc/[0-9]*/exe; do
+        if [ "$(readlink "$link" 2>/dev/null)" = "$GAME" ]; then
+            pid=${link#/proc/}
+            echo "${pid%/exe}"
+            return 0
+        fi
+    done
+    return 1
+}
+
+case ${1:-} in
+    --help|-h) usage; exit 0 ;;
+    --game-help) "$GAME" --no-such-option; exit 0 ;;
+esac
+
+seed
+GAMEDIR=$(game_dir)
+has_game "$GAMEDIR" || no_game
+
+case ${1:-} in
+    --play) shift; run_game "$@" ;;
+    ?*)     run_game "$@" ;;
+esac
+
+"$LAUNCHER"
+rc=$?
+
+# The launcher can't start (no GTK 3 on this system, say) and nothing was started from it: straight into the game.
+if [ "$rc" -ne 0 ] && ! find_game >/dev/null; then
+    echo "The launcher did not start (exit $rc); starting the game directly." >&2
+    run_game
+fi
+
+# The launcher stays open while the game runs and may be closed first. The image is unmounted as soon as this script
+# ends, which would pull the running game out from under itself, so stay until the last game has ended. "Running" is
+# the process still being the game: an ended one that nobody has reaped yet, or its number reused, does not count.
+while pid=$(find_game); do
+    while [ "$(readlink "/proc/$pid/exe" 2>/dev/null)" = "$GAME" ]; do sleep 1; done
+done

@@ -90,12 +90,29 @@ static char **args_with_file(int *argc, char **argv)
     return out;
 }
 
+/* OG: TDIII.EXE, else TD3.EXE, in `dir` in any case. Linux file systems tell upper and lower case apart; the game's
+ * other files are looked up the same way (host_game_path). Returns a malloc'd path (SDL_free) or NULL. */
+static char *find_exe(const char *dir)
+{
+    static const char *const names[] = { TD_EXE_NAME, TD_EXE_ALT_NAME };
+    int count = 0;
+    char **entries = SDL_GlobDirectory(dir, NULL, 0, &count);
+    char *found = NULL;
+    for (int n = 0; n < 2 && !found; n++)
+        for (int i = 0; entries && i < count; i++)
+            if (SDL_strcasecmp(entries[i], names[n]) == 0) {
+                SDL_asprintf(&found, "%s/%s", dir, entries[i]);
+                break;
+            }
+    SDL_free(entries);
+    return found;
+}
+
 /* OG: "Game" relative to the working directory, else "Game" next to the exe */
 static const char *default_game_dir(void)
 {
-    FILE *probe = fopen("Game/" TD_EXE_NAME, "rb");
-    if (!probe) probe = fopen("Game/" TD_EXE_ALT_NAME, "rb");
-    if (probe) { fclose(probe); return "Game"; }
+    char *probe = find_exe("Game");
+    if (probe) { SDL_free(probe); return "Game"; }
     const char *base = SDL_GetBasePath();
     if (!base) return "Game";
     static char dir[1024];
@@ -158,10 +175,9 @@ int main(int argc, char **argv)
     }
 
     char exe_path[1024];
-    snprintf(exe_path, sizeof exe_path, "%s/%s", dir, TD_EXE_NAME);
-    FILE *probe = fopen(exe_path, "rb");
-    if (probe) fclose(probe);
-    else snprintf(exe_path, sizeof exe_path, "%s/%s", dir, TD_EXE_ALT_NAME);
+    char *found = find_exe(dir);                       /* OG: any case */
+    if (found) { SDL_strlcpy(exe_path, found, sizeof exe_path); SDL_free(found); }
+    else snprintf(exe_path, sizeof exe_path, "%s/%s", dir, TD_EXE_NAME);
     char err[256];
     if (!mem_load_exe(exe_path, err, sizeof err)) {
         fprintf(stderr, "%s\n", err);

@@ -1,5 +1,15 @@
 # Changelog
 
+## 0.2.0-og10 downloads (fork)
+
+- Ready-made downloads, both without game files: a Windows zip (upstream 0.2.0's launcher and its DLLs with this
+  fork's game, `packaging/windows/make-zip.sh`) and a Linux AppImage (`packaging/appimage`). The AppImage asks for
+  your game files on the first start and opens the folder they go into. README "Download and play".
+- The game's own random number routine is `game_random()` now: glibc declares a `random()` of its own, which broke
+  the Linux build. Nothing else changes.
+- `TDIII.EXE` (or `TD3.EXE`) is found in any case, like the game's other files: on Linux a copy with lower-case
+  names (`tdiii.exe`) stopped with "cannot read .../TD3.EXE".
+
 ## 0.2.0-og10 (fork)
 
 - Every job's goal can be reached: a goal's door must be at most 40 m on foot from the leg's main road, searched over

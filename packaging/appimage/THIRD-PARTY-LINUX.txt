@@ -1,0 +1,9 @@
+Parts of this package (the game and its launcher are MIT, see LICENSE):
+
+* SDL 3 (built into testdrive3-enhanced) - zlib licence, https://www.libsdl.org/
+* Nuked-OPL3 (built into testdrive3-enhanced) - LGPL 2.1 or later, https://github.com/nukeykt/Nuked-OPL3
+* wxWidgets (built into the launcher) - wxWindows Library Licence, https://www.wxwidgets.org/
+* AppImage type 2 runtime (the start of the image file) - MIT, with squashfuse (BSD-2-Clause) and libfuse (LGPL 2.1),
+  https://github.com/AppImage/type2-runtime
+* Test Drive III: The Passion (Accolade, 1990) is not included; you need your own copy (version 3.0). Its files remain
+  the property of their rights holders.

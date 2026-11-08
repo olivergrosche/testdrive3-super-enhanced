@@ -1,0 +1,6 @@
+Copy all files of your Test Drive III (version 3.0) into this folder:
+
+TDIII.EXE (or TD3.EXE), PLAYDISK.DAT, DATAA.DAT, DATAB.DAT, DATAC.DAT, INSTR.DAT,
+the car files C*.DAT / .LST / .POB and the scene files SCENE*.DAT / .LST / .HI.
+
+Then run "Test Drive III Enhanced.exe" (or testdrive3-enhanced.exe) one folder up.

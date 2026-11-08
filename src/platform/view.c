@@ -84,12 +84,12 @@ void rect_restore(s16 x0, s16 x1, s16 y0, s16 y1)
     } while (--rows);
 }
 
-/* 0c1c:0aa5 dissolve_poll — platform.md §4.3.5 (random(), then key_poll(&DS:90DA) if DS:009F, else
+/* 0c1c:0aa5 dissolve_poll — platform.md §4.3.5 (game_random(), then key_poll(&DS:90DA) if DS:009F, else
  * DS:008C = 0). The original restores SI/DI/ES from DS:90D4..90D8 for the C calls: registers are not
  * modelled. */
 static void dissolve_poll(void)
 {
-    (void)random();
+    (void)game_random();
     if (DSB(DS_skip_enabled) == 0) {
         DSB(DS_skip_flag) = 0;
         return;

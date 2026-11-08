@@ -1,0 +1,15 @@
+Test Drive III Super Enhanced 0.2.0-og10
+
+You need your own copy of Test Drive III: The Passion, version 3.0. Nothing of the original game is included.
+
+1. Copy all files of your Test Drive III into the folder "Game" here: TDIII.EXE (or TD3.EXE), PLAYDISK.DAT,
+   DATAA.DAT, DATAB.DAT, DATAC.DAT, INSTR.DAT, the car files C*.DAT / .LST / .POB and the scene files
+   SCENE*.DAT / .LST / .HI.
+2. Run "Test Drive III Enhanced.exe" to choose the car, course and options and press Play,
+   or run testdrive3-enhanced.exe directly.
+3. Keep the folder writable: high scores and your last choices are saved in "Game".
+
+Wrong version? In a command prompt in this folder, "testdrive3-enhanced.exe --check" loads TDIII.EXE and says
+whether it fits. An older 1990 TD3.EXE (123,745 bytes) stops with "unexpected load image size".
+
+Controls and everything the mod adds: README.md. Out of the car: stop (or slow down), hold Y on the pad or press E.

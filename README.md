@@ -24,6 +24,28 @@ Everything the fork adds is marked `OG:` in the code; `CHANGELOG.md` lists it by
 needs the original game (version 3.0) as upstream does; the game files are not included. The port, its faithful
 engine and the enhanced renderer are upstream's work. MIT, see `LICENSE`.
 
+## Download and play
+
+You need your own copy of *Test Drive III: The Passion*, **version 3.0**. Nothing of the original game is included.
+The downloads are on the [Releases page](https://github.com/olivergrosche/testdrive3-super-enhanced/releases).
+
+* **Windows:** unpack `TestDrive3-Super-Enhanced-<version>-win64.zip`, copy all your game files into its `Game`
+  folder, then run `Test Drive III Enhanced.exe` (the launcher: car, course, picture, keys; **Play** starts the game)
+  or `testdrive3-enhanced.exe` directly.
+* **Linux:** make `TestDrive3-Super-Enhanced-<version>-x86_64.AppImage` executable and start it. The first start
+  opens `~/.local/share/testdrive3-super-enhanced/Game`; copy your game files there and start again
+  (`packaging/appimage/README-LINUX.md`).
+* **Steam Deck:** the AppImage, added to Steam as a non-Steam game with the launch option `--play` (no Proton
+  needed), or the Windows zip's `testdrive3-enhanced.exe` under Proton.
+* **Is your copy the right one?** `testdrive3-enhanced.exe --check` (the AppImage: `--check`) loads `TDIII.EXE` and
+  says whether it fits. The version 3.0 file this mod was made with is 125,251 bytes; an older 1990 `TD3.EXE`
+  (123,745 bytes) stops with "unexpected load image size". Upper or lower case file names do not matter.
+
+**First minutes:** drive as in the original (pad: RT gas, LT brake, left stick; keyboard: arrows). Tap Y on the pad
+(F8) for the chase view. Hold Y (E) to get out, also while driving: the car brakes itself. On foot RT (left mouse)
+punches or fires, RB (Q) changes the weapon. In a village walk into the ring at a door to shop or take a job. All
+controls: *Controls* below.
+
 ---
 
 # Test Drive III Enhanced — SDL3
