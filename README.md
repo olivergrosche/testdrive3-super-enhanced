@@ -37,7 +37,8 @@ The downloads are on the [Releases page](https://github.com/olivergrosche/testdr
   (`packaging/appimage/README-LINUX.md`).
 * **Steam Deck:** the AppImage, added to Steam as a non-Steam game with the launch option `--play` (no Proton
   needed), or the Windows zip's `testdrive3-enhanced.exe` under Proton.
-* **Which copy works:** version 3.0. Its `TDIII.EXE` is **125,251 bytes**, dated 26 April 1994, with the SHA-1
+* **Which copy works:** version 3.0, the final release of 1990 (1.0 and 2.0 came out shortly before it). Its
+  `TDIII.EXE` is **125,251 bytes**, with the SHA-1
   `a09b0d620b91247976a7d172fd433e8c6af25926` (SHA-256
   `8c5e8fd00f39fa094aa7227d8a212fa16af3fbe47a6ca31c85cf32a740b03b96`). Many copies around are other versions; they
   stop with "unexpected load image size". Check yours: `testdrive3-enhanced.exe --check` (the AppImage: `--check`)
